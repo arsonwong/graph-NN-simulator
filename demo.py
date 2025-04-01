@@ -69,6 +69,7 @@ def visualize_pair(particle_type, position_pred, position_gt, metadata):
     return animation.FuncAnimation(fig, update, frames=np.arange(0, position_gt.size(1)), interval=1, blit=True)
 
 if __name__ == '__main__':
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     with open("config.yaml", "r") as f:
         config = yaml.safe_load(f)
@@ -82,7 +83,7 @@ if __name__ == '__main__':
     simulator = LearnedSimulator(hidden_size=model_params["hidden_size"], 
                                     n_mp_layers=model_params["n_mp_layers"], 
                                     window_size=model_params["window_size"])
-    simulator = simulator.cuda()
+    simulator = simulator.to(device)
 
     checkpoint = torch.load(os.path.join(model_path, "2025-04-01_14_44_checkpoint_100.pt"))
     simulator.load_state_dict(checkpoint["model"])

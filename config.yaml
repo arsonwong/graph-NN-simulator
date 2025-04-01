@@ -8,9 +8,9 @@ training:
   batch_size: 4
   lr: 1.0e-4
   noise: 3.0e-4
-  save_interval: 2000
-  eval_interval: 2000
-  rollout_interval: 2000
+  save_interval: 5000
+  eval_interval: 5000
+  rollout_interval: 5000
   session_name: ""
 
 model:

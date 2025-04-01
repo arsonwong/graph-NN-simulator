@@ -42,7 +42,7 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
         batch_count = 0
         for data in progress_bar:
             optimizer.zero_grad()
-            data = data.cuda()
+            data = data.to(device)
             pred = simulator(data)
             loss = loss_fn(pred, data.y)
             loss.backward()
@@ -138,6 +138,7 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
     return train_loss_list, eval_loss_list, onestep_mse_list, rollout_mse_list
 
 if __name__ == '__main__':
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     with open("config.yaml", "r") as f:
         config = yaml.safe_load(f)
@@ -165,7 +166,7 @@ if __name__ == '__main__':
     simulator = LearnedSimulator(hidden_size=model_params["hidden_size"], 
                                     n_mp_layers=model_params["n_mp_layers"], 
                                     window_size=model_params["window_size"])
-    simulator = simulator.cuda()
+    simulator = simulator.to(device)
 
     # train the model
     metadata = read_metadata(data_path)
