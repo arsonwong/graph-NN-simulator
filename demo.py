@@ -17,11 +17,11 @@ https://medium.com/stanford-cs224w/simulating-complex-physics-with-graph-network
 '''
 
 TYPE_TO_COLOR = {
-    3: "black",
-    0: "green",
-    7: "magenta",
-    6: "gold",
-    5: "blue",
+    3: "black",  # Boundary particles.
+    0: "green",  # Rigid solids.
+    7: "magenta",  # Goop.
+    6: "gold",  # Sand.
+    5: "blue",  # Water.
 }
 
 def visualize_prepare(ax, particle_type, position, metadata):
@@ -85,12 +85,12 @@ if __name__ == '__main__':
                                     window_size=model_params["window_size"])
     simulator = simulator.to(device)
 
-    checkpoint = torch.load(os.path.join(model_path, "2025-04-01_14_44_checkpoint_100.pt"))
+    checkpoint = torch.load(os.path.join(model_path, "2025-04-01_21_35_checkpoint_175000.pt"))
     simulator.load_state_dict(checkpoint["model"])
     rollout_dataset = RolloutDataset(data_path, "valid")
     simulator.eval()
 
-    rollout_data = rollout_dataset[0]
+    rollout_data = rollout_dataset[1]
     rollout_out = rollout(simulator, rollout_data, rollout_dataset.metadata, params["noise"])
 
     anim = visualize_pair(rollout_data["particle_type"], rollout_out, rollout_data["position"], rollout_dataset.metadata)

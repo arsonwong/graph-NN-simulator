@@ -5,6 +5,7 @@ import numpy as np
 import torch_geometric as pyg
 import pickle
 from tqdm import tqdm
+import yaml
 
 '''
 This code is a PyTorch implementation of a graph neural network (GNN) simulator for particle dynamics, specifically designed to simulate the motion of particles in a 2D space. 
@@ -14,6 +15,12 @@ https://colab.research.google.com/drive/1hirUfPgLU35QCSQSZ7T2lZMyFMOaK_OF?usp=sh
 which is also described in this Medium article: Simulating Complex Physics with Graph Networks: step by step
 https://medium.com/stanford-cs224w/simulating-complex-physics-with-graph-networks-step-by-step-177354cb9b05
 '''
+
+KINEMATIC_PARTICLE_ID = 3
+
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
+    max_neighbours = config["model"]["max_neighbours"]
 
 def read_metadata(data_path):
   with open(os.path.join(data_path, 'metadata.json'), 'rt') as fp:
@@ -33,15 +40,30 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     """Preprocess a trajectory and construct the graph"""
     # apply noise to the trajectory
     position_noise = generate_noise(position_seq, noise_std)
+    # obstacle particles are not allowed to move
+    obstacle_particle_indices = torch.where(particle_type == KINEMATIC_PARTICLE_ID)[0]
+    position_noise[obstacle_particle_indices, :] = 0.0
     position_seq = position_seq + position_noise
 
     # calculate the velocities of particles
     recent_position = position_seq[:, -1]
     velocity_seq = position_seq[:, 1:] - position_seq[:, :-1]
 
-    # construct the graph based on the distances between particles
+    # construct the graph based on the distances between particles, but end up making advacency matrix symmetrical
     n_particle = recent_position.size(0)
-    edge_index = pyg.nn.radius_graph(recent_position, metadata["default_connectivity_radius"], loop=True, max_num_neighbors=n_particle)
+    edge_index = pyg.nn.radius_graph(recent_position, metadata["default_connectivity_radius"], loop=False, max_num_neighbors=max_neighbours)
+    edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)
+    edge_index2 = pyg.nn.radius_graph(recent_position, metadata["default_connectivity_radius"], loop=False)
+    opposite_particles = torch.where(particle_type[edge_index2[0,:]] != particle_type[edge_index2[1,:]])[0]
+    edge_index2 = edge_index2[:,opposite_particles]
+    edge_index = torch.cat([edge_index, edge_index2], dim=1)
+    edge_index = torch.unique(edge_index, dim=1)
+
+    nodes_with_opp_neighbour = edge_index2.flatten()
+    nodes_with_opp_neighbour = torch.unique(nodes_with_opp_neighbour)
+    has_opp_neighbour = torch.zeros(n_particle, dtype=torch.bool)
+    has_opp_neighbour[nodes_with_opp_neighbour] = True   
+    has_opp_neighbour[obstacle_particle_indices] = False 
     
     # node-level features: velocity, distance to the boundary
     normal_velocity_seq = (velocity_seq - torch.tensor(metadata["vel_mean"])) / torch.sqrt(torch.tensor(metadata["vel_std"]) ** 2 + noise_std ** 2)
@@ -73,7 +95,8 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         edge_index=edge_index,
         edge_attr=torch.cat((edge_displacement, edge_distance), dim=-1),
         y=acceleration,
-        pos=torch.cat((velocity_seq.reshape(velocity_seq.size(0), -1), distance_to_boundary), dim=-1)
+        pos=torch.cat((velocity_seq.reshape(velocity_seq.size(0), -1), distance_to_boundary), dim=-1),
+        aux = has_opp_neighbour
     )
 
     return graph
@@ -128,8 +151,6 @@ class OneStepDataset(pyg.data.Dataset):
         # construct the graph
         with torch.no_grad():
             graph = preprocess(particle_type, position_seq, target_position, self.metadata, self.noise_std)
-        if self.return_pos:
-          return graph, position_seq[:, -1]
         return graph
 
 class RolloutDataset(pyg.data.Dataset):
@@ -165,6 +186,7 @@ def rollout(model, data, metadata, noise_std, rollout_length=None):
     # traj = traj.permute(1, 0, 2)
     particle_type = data["particle_type"]
     boundary = torch.tensor(metadata["bounds"])
+    obstacle_particle_indices = torch.where(particle_type == KINEMATIC_PARTICLE_ID)[0]
 
     for time in tqdm(range(total_time - window_size),desc="rollout"):
         with torch.no_grad():
@@ -177,6 +199,11 @@ def rollout(model, data, metadata, noise_std, rollout_length=None):
             recent_velocity = recent_position - traj[:, -2]
             new_velocity = recent_velocity + acceleration
             new_position = recent_position + new_velocity
+            
+            # obstacle particles just follow the ground truth positions
+            if len(obstacle_particle_indices) > 0:
+                new_position[obstacle_particle_indices,:] = data["position"][obstacle_particle_indices, time+window_size,:]
+
             new_position[:,0] = torch.maximum(new_position[:,0], boundary[0,0])
             new_position[:,1] = torch.maximum(new_position[:,1], boundary[1,0])
             new_position[:,0] = torch.minimum(new_position[:,0], boundary[0,1])
@@ -186,7 +213,7 @@ def rollout(model, data, metadata, noise_std, rollout_length=None):
     return traj
 
 
-def oneStepMSE(simulator, dataloader, metadata, noise):
+def oneStepMSE(simulator, dataloader, metadata, noise, sets_to_test=500):
     """Returns two values, loss and MSE"""
     total_loss = 0.0
     total_mse = 0.0
@@ -196,13 +223,19 @@ def oneStepMSE(simulator, dataloader, metadata, noise):
         scale = torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2 + noise ** 2).cuda()
         for data in tqdm(dataloader,desc="Validating"):
             data = data.cuda()
+            particle_type = data.x
+            obstacle_particle_indices = torch.where(particle_type == KINEMATIC_PARTICLE_ID)[0]
             pred = simulator(data)
+            pred[obstacle_particle_indices,:] = data.y[obstacle_particle_indices,:]
+            # mask out loss on kinematic particles
             mse = ((pred - data.y) * scale) ** 2
             mse = mse.sum(dim=-1).mean()
             loss = ((pred - data.y) ** 2).mean()
             total_mse += mse.item()
             total_loss += loss.item()
             batch_count += 1
+            if batch_count >= sets_to_test:
+                break
     return total_loss / batch_count, total_mse / batch_count
 
 def rolloutMSE(simulator, dataset, metadata, noise, sets_to_test=1):
@@ -222,5 +255,4 @@ def rolloutMSE(simulator, dataset, metadata, noise, sets_to_test=1):
             total_mse += mse.item()
             total_loss += loss.item()
             batch_count += 1
-        print(scale)
     return total_loss / batch_count, total_mse / batch_count

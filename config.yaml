@@ -1,10 +1,10 @@
 data:
-  data_path : "datasets/WaterDrop"
-  model_path : "models/WaterDrop"
-  training_stats_path : "training stats/WaterDrop"
+  data_path : "datasets/WaterRamps"
+  model_path : "models/WaterRamps"
+  training_stats_path : "training stats/WaterRamps"
 
 training:
-  epoch: 1
+  epoch: 5
   batch_size: 4
   lr: 1.0e-4
   noise: 3.0e-4
@@ -12,8 +12,12 @@ training:
   eval_interval: 5000
   rollout_interval: 5000
   session_name: ""
+  visualize: TRUE
+  load_model_path: ""
+  obstacle_bias: 2
 
 model:
   hidden_size: 128
   n_mp_layers: 10
   window_size: 5
+  max_neighbours: 20

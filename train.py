@@ -19,7 +19,7 @@ https://medium.com/stanford-cs224w/simulating-complex-physics-with-graph-network
 '''
 
 
-def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout_dataset, visualize=False, prefix=""):
+def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout_dataset, obstacle_bias=0.0, visualize=False, prefix=""):
     loss_fn = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(simulator.parameters(), lr=params["lr"])
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.1 ** (1 / 5e6))
@@ -43,8 +43,16 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
         for data in progress_bar:
             optimizer.zero_grad()
             data = data.to(device)
+            has_opp_neighbour = data.aux
             pred = simulator(data)
+            particle_type = data.x
+            obstacle_particle_indices = torch.where(particle_type == KINEMATIC_PARTICLE_ID)[0]
+            find_ = torch.where(has_opp_neighbour)[0]
+            pred[find_,:] *= 1.0+obstacle_bias
+            data.y[find_,:] *= 1.0+obstacle_bias
+            pred[obstacle_particle_indices,:] = data.y[obstacle_particle_indices,:]
             loss = loss_fn(pred, data.y)
+
             loss.backward()
             optimizer.step()
             scheduler.step()
@@ -149,6 +157,9 @@ if __name__ == '__main__':
     model_path = config['data']['model_path']
     training_stats_path = config['data']['training_stats_path']
     session_name = config["training"]['session_name']
+    visualize = config["training"]['visualize']
+    load_model_path = config["training"]['load_model_path']
+    obstacle_bias = config["training"]['obstacle_bias']
 
     if len(session_name)>0:
         session_name += "_"
@@ -159,7 +170,7 @@ if __name__ == '__main__':
     train_dataset = OneStepDataset(data_path, "train", noise_std=params["noise"])
     valid_dataset = OneStepDataset(data_path, "valid", noise_std=params["noise"])
     train_loader = pyg.loader.DataLoader(train_dataset, batch_size=params["batch_size"], shuffle=True, pin_memory=True, num_workers=1)
-    valid_loader = pyg.loader.DataLoader(valid_dataset, batch_size=params["batch_size"], shuffle=False, pin_memory=True, num_workers=1)
+    valid_loader = pyg.loader.DataLoader(valid_dataset, batch_size=params["batch_size"], shuffle=True, pin_memory=True, num_workers=1)
     valid_rollout_dataset = RolloutDataset(data_path, "valid")
 
     # build model
@@ -168,6 +179,11 @@ if __name__ == '__main__':
                                     window_size=model_params["window_size"])
     simulator = simulator.to(device)
 
+    if len(load_model_path)>0:
+        checkpoint = torch.load(os.path.join(model_path, load_model_path))
+        simulator.load_state_dict(checkpoint["model"])
+
     # train the model
     metadata = read_metadata(data_path)
-    train_loss_list, eval_loss_list, onestep_mse_list, rollout_mse_list = train(params, simulator, train_loader, valid_loader, metadata, valid_rollout_dataset, prefix=session_name)
+    train_loss_list, eval_loss_list, onestep_mse_list, rollout_mse_list = train(params, simulator, train_loader, valid_loader, metadata, valid_rollout_dataset, 
+                                                                                obstacle_bias=obstacle_bias, prefix=session_name, visualize=visualize)
