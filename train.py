@@ -167,7 +167,7 @@ if __name__ == '__main__':
     session_name += datetime.now().strftime("%Y-%m-%d_%H_%M")
 
     # load dataset
-    train_dataset = OneStepDataset(data_path, "train", noise_std=params["noise"])
+    train_dataset = OneStepDataset(data_path, "train", noise_std=params["noise"], random_rotation=True)
     valid_dataset = OneStepDataset(data_path, "valid", noise_std=params["noise"])
     train_loader = pyg.loader.DataLoader(train_dataset, batch_size=params["batch_size"], shuffle=True, pin_memory=True, num_workers=1)
     valid_loader = pyg.loader.DataLoader(valid_dataset, batch_size=params["batch_size"], shuffle=True, pin_memory=True, num_workers=1)

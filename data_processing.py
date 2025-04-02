@@ -26,7 +26,7 @@ def read_metadata(data_path):
   with open(os.path.join(data_path, 'metadata.json'), 'rt') as fp:
     return json.loads(fp.read())
     
-def preprocess(particle_type, position_seq, target_position, metadata, noise_std):
+def preprocess(particle_type, position_seq, target_position, metadata, noise_std, rotation=0):
     def generate_noise(position_seq, noise_std):
         """Generate noise for a trajectory"""
         velocity_seq = position_seq[:, 1:] - position_seq[:, :-1]
@@ -36,6 +36,27 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         position_noise = velocity_noise.cumsum(dim=1)
         position_noise = torch.cat((torch.zeros_like(position_noise)[:, 0:1], position_noise), dim=1)
         return position_noise
+    
+    def rotate(tensor, rotation):
+        if rotation == 1: # CCW
+            tensor = tensor[..., [1, 0]]
+            tensor[...,0] = -tensor[..., 0]
+        elif rotation == 2: # 180
+            tensor = -tensor
+        elif rotation == 3: # CW
+            tensor = tensor[..., [1, 0]]
+            tensor[...,1] = -tensor[..., 1]
+        return tensor
+    
+    boundary = torch.tensor(metadata["bounds"])
+    if rotation != 0:
+        center = 0.5 * (boundary[:,0] + boundary[:,1])
+        position_seq = position_seq - center
+        position_seq = rotate(position_seq, rotation)
+        position_seq = position_seq + center
+        target_position = target_position - center
+        target_position = rotate(target_position, rotation) 
+        target_position = target_position + center
 
     """Preprocess a trajectory and construct the graph"""
     # apply noise to the trajectory
@@ -67,18 +88,37 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     
     # node-level features: velocity, distance to the boundary
     normal_velocity_seq = (velocity_seq - torch.tensor(metadata["vel_mean"])) / torch.sqrt(torch.tensor(metadata["vel_std"]) ** 2 + noise_std ** 2)
-    boundary = torch.tensor(metadata["bounds"])
     distance_to_lower_boundary = recent_position - boundary[:, 0]
     distance_to_upper_boundary = boundary[:, 1] - recent_position
     distance_to_boundary = torch.cat((distance_to_lower_boundary, distance_to_upper_boundary), dim=-1)
-    distance_to_boundary = torch.clip(distance_to_boundary / metadata["default_connectivity_radius"], -1.0, 1.0)
+    distance_to_boundary = torch.abs(distance_to_boundary)
+    norm_distance_to_boundary = torch.clip(distance_to_boundary / metadata["default_connectivity_radius"], -1.0, 1.0)
+    norm_distance_to_boundary, arg_min = torch.min(norm_distance_to_boundary, dim=-1)
+    # 1 if touching, 0 at default_connectivity_radius or beyond
+    norm_inv_distance_to_boundary = (1/(norm_distance_to_boundary + 0.1) - 1/1.1)/(1/0.1-1/1.1)
+    direction_to_boundary = torch.zeros_like(recent_position)
+    find_ = torch.where(arg_min == 0)[0]
+    direction_to_boundary[find_, 0] = -1.0
+    find_ = torch.where(arg_min == 1)[0]    
+    direction_to_boundary[find_, 0] = 1.0
+    find_ = torch.where(arg_min == 2)[0]    
+    direction_to_boundary[find_, 1] = -1.0
+    find_ = torch.where(arg_min == 3)[0]
+    direction_to_boundary[find_, 1] = 1.0
 
     # edge-level features: displacement, distance
     dim = recent_position.size(-1)
     edge_displacement = (torch.gather(recent_position, dim=0, index=edge_index[0].unsqueeze(-1).expand(-1, dim)) -
                    torch.gather(recent_position, dim=0, index=edge_index[1].unsqueeze(-1).expand(-1, dim)))
     edge_displacement /= metadata["default_connectivity_radius"]
+    recent_normal_velocity = normal_velocity_seq[:, -1]
+    normal_relative_velocity = (torch.gather(recent_normal_velocity, dim=0, index=edge_index[0].unsqueeze(-1).expand(-1, dim)) -
+                torch.gather(recent_normal_velocity, dim=0, index=edge_index[1].unsqueeze(-1).expand(-1, dim)))
     edge_distance = torch.norm(edge_displacement, dim=-1, keepdim=True)
+    edge_direction = torch.zeros_like(edge_displacement)
+    find_ = torch.where(edge_distance > 0)[0]
+    edge_direction[find_, :] = edge_displacement[find_, :] / edge_distance[find_]
+    norm_inv_edge_distance = (1/(edge_distance + 0.1) - 1/1.1)/(1/0.1-1/1.1)
 
     # ground truth for training
     if target_position is not None:
@@ -93,16 +133,16 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     graph = pyg.data.Data(
         x=particle_type,
         edge_index=edge_index,
-        edge_attr=torch.cat((edge_displacement, edge_distance), dim=-1),
+        edge_attr=torch.cat((edge_direction, norm_inv_edge_distance, normal_relative_velocity), dim=-1),
         y=acceleration,
-        pos=torch.cat((velocity_seq.reshape(velocity_seq.size(0), -1), distance_to_boundary), dim=-1),
+        pos=torch.cat((normal_velocity_seq.reshape(velocity_seq.size(0), -1), norm_inv_distance_to_boundary.unsqueeze(1), direction_to_boundary), dim=-1),
         aux = has_opp_neighbour
     )
 
     return graph
 
 class OneStepDataset(pyg.data.Dataset):
-    def __init__(self, data_path, split, window_length=7, noise_std=0.0, return_pos=False):
+    def __init__(self, data_path, split, window_length=7, noise_std=0.0, return_pos=False, random_rotation=False):
         super().__init__()
 
         # load dataset from the disk
@@ -114,6 +154,7 @@ class OneStepDataset(pyg.data.Dataset):
         self.window_length = window_length
         self.noise_std = noise_std
         self.return_pos = return_pos
+        self.random_rotation = random_rotation
 
         # cut particle trajectories according to time slices
         self.windows = np.array([])
@@ -150,7 +191,10 @@ class OneStepDataset(pyg.data.Dataset):
         
         # construct the graph
         with torch.no_grad():
-            graph = preprocess(particle_type, position_seq, target_position, self.metadata, self.noise_std)
+            rotation = 0
+            if self.random_rotation:
+                rotation = np.random.randint(0, 4)
+            graph = preprocess(particle_type, position_seq, target_position, self.metadata, self.noise_std, rotation=rotation)
         return graph
 
 class RolloutDataset(pyg.data.Dataset):
