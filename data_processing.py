@@ -49,6 +49,8 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         return tensor
     
     boundary = torch.tensor(metadata["bounds"])
+    down_direction = torch.zeros_like(target_position)
+    down_direction[:,1] = -1.0
     if rotation != 0:
         center = 0.5 * (boundary[:,0] + boundary[:,1])
         position_seq = position_seq - center
@@ -57,6 +59,7 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         target_position = target_position - center
         target_position = rotate(target_position, rotation) 
         target_position = target_position + center
+        down_direction = rotate(down_direction, rotation)
 
     """Preprocess a trajectory and construct the graph"""
     # apply noise to the trajectory
@@ -135,7 +138,7 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         edge_index=edge_index,
         edge_attr=torch.cat((edge_direction, norm_inv_edge_distance, normal_relative_velocity), dim=-1),
         y=acceleration,
-        pos=torch.cat((normal_velocity_seq.reshape(velocity_seq.size(0), -1), norm_inv_distance_to_boundary.unsqueeze(1), direction_to_boundary), dim=-1),
+        pos=torch.cat((normal_velocity_seq.reshape(velocity_seq.size(0), -1), norm_inv_distance_to_boundary.unsqueeze(1), direction_to_boundary, down_direction), dim=-1),
         aux = has_opp_neighbour
     )
 
