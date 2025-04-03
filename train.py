@@ -43,7 +43,7 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
         for data in progress_bar:
             optimizer.zero_grad()
             data = data.to(device)
-            has_opp_neighbour = data.aux
+            has_opp_neighbour = data.aux['has_opp_neighbour']
             pred = simulator(data)
             particle_type = data.x
             obstacle_particle_indices = torch.where(particle_type == KINEMATIC_PARTICLE_ID)[0]

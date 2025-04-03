@@ -23,6 +23,26 @@ Moreover for distances, use 1/(distance+tiny_bias) to make things more "impenetr
 There will be higher sense of urgency to move away from each other (done)
 '''
 
+'''
+2025-04-03 more physics
+acceleration due to neighbours + gravity + walls = 
+function (relative velocity, relative position, down direction, proximity to wall, wall direction, abs position [since walls don't move])
+
+change to
+
+acceleration due to neighbours = function (relative velocitIES, relative position)
+where (relative velocitIES, relative position) is passed to the edge
+and the node just embeds a blank thing at the start (no information inside)
+
+acceleration due to gravity = constant * down direction
+
+acceleration due to walls = some perpend magnitude (proximity to wall, abs velocitIES in relation to wall direction) * wall direction
++ some parallel magnitude (proximity to wall, abs velocitIES in relation to wall direction) * (parallel to wall direction)
+so that friction can be captured
+
+total acceleration = acceleration due to neighbours + acceleration due to gravity + acceleration due to walls'
+'''
+
 class MLP(torch.nn.Module):
     """Multi-Layer perceptron"""
     def __init__(self, input_size, hidden_size, output_size, layers, layernorm=True):
@@ -89,13 +109,16 @@ class LearnedSimulator(torch.nn.Module):
         super().__init__()
         self.window_size = window_size
         self.embed_type = torch.nn.Embedding(num_particle_types, particle_type_dim)
-        self.node_in = MLP(particle_type_dim + dim * (window_size + 2) + 1, hidden_size, hidden_size, 3)
-        self.edge_in = MLP(2*dim + 1, hidden_size, hidden_size, 3)
+        self.node_in = MLP(particle_type_dim, hidden_size, hidden_size, 3)
+        self.edge_in = MLP(dim*(window_size+1) + 1, hidden_size, hidden_size, 3)
         self.node_out = MLP(hidden_size, hidden_size, dim, 3, layernorm=False)
+        self.wall_in = MLP(dim*window_size + 1, hidden_size, dim, 3)
         self.n_mp_layers = n_mp_layers
         self.layers = torch.nn.ModuleList([InteractionNetwork(
             hidden_size, 3
         ) for _ in range(n_mp_layers)])
+
+        self.gravity = torch.nn.Parameter(torch.tensor(0.0))
 
         self.reset_parameters()
 
@@ -105,12 +128,27 @@ class LearnedSimulator(torch.nn.Module):
     def forward(self, data: pyg.data.Data) -> torch.Tensor:
         # pre-processing
         # node feature: combine categorial feature data.x and contiguous feature data.pos.
-        node_feature = torch.cat((self.embed_type(data.x), data.pos), dim=-1)
+        node_feature = self.embed_type(data.x)
         node_feature = self.node_in(node_feature)
         edge_feature = self.edge_in(data.edge_attr)
         # stack of GNN layers
         for i in range(self.n_mp_layers):
             node_feature, edge_feature = self.layers[i](node_feature, data.edge_index, edge_feature=edge_feature)
         # post-processing
+        # acceleration due to neighbours
         out = self.node_out(node_feature)
+
+        wall_in_parameters = data.aux['wall_in_parameters']
+        direction_to_boundary = data.aux['direction_to_boundary']
+        direction_parallel_boundary = data.aux['direction_parallel_boundary']
+        down_direction = data.aux['down_direction']
+        # acceleration due to walls
+
+        #acceleration due to gravity = constant * down direction
+        out += self.gravity*down_direction
+
+        #acceleration due to walls = some magnitude (proximity to wall, relative velocitIES) * wall direction
+        wall_out = self.wall_in(wall_in_parameters)
+        out +=  wall_out[:,0].unsqueeze(1) * direction_to_boundary + wall_out[:,1].unsqueeze(1) * direction_parallel_boundary
+
         return out

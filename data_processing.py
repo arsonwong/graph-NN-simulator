@@ -101,26 +101,34 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     distance_to_boundary = torch.abs(distance_to_boundary)
     norm_distance_to_boundary = torch.clip(distance_to_boundary / metadata["default_connectivity_radius"], -1.0, 1.0)
     norm_distance_to_boundary, arg_min = torch.min(norm_distance_to_boundary, dim=-1)
+    # left wall, lower wall, right wall, upper wall
     # 1 if touching, 0 at default_connectivity_radius or beyond
     norm_inv_distance_to_boundary = (1/(norm_distance_to_boundary + 0.1) - 1/1.1)/(1/0.1-1/1.1)
     direction_to_boundary = torch.zeros_like(recent_position)
+    direction_parallel_boundary = torch.zeros_like(recent_position)
     find_ = torch.where(arg_min == 0)[0]
     direction_to_boundary[find_, 0] = -1.0
+    direction_parallel_boundary[find_, 1] = -1.0
     find_ = torch.where(arg_min == 1)[0]    
-    direction_to_boundary[find_, 0] = 1.0
-    find_ = torch.where(arg_min == 2)[0]    
     direction_to_boundary[find_, 1] = -1.0
+    direction_parallel_boundary[find_, 0] = 1.0
+    find_ = torch.where(arg_min == 2)[0]    
+    direction_to_boundary[find_, 0] = 1.0
+    direction_parallel_boundary[find_, 1] = 1.0
     find_ = torch.where(arg_min == 3)[0]
     direction_to_boundary[find_, 1] = 1.0
+    direction_parallel_boundary[find_, 0] = -1.0
+    normal_velocity_seq_to_wall = torch.einsum("ijk,ik->ij", normal_velocity_seq, direction_to_boundary)
+    normal_velocity_seq_parallel_to_wall = torch.einsum("ijk,ik->ij", normal_velocity_seq, direction_parallel_boundary)
 
     # edge-level features: displacement, distance
     dim = recent_position.size(-1)
     edge_displacement = (torch.gather(recent_position, dim=0, index=edge_index[0].unsqueeze(-1).expand(-1, dim)) -
                    torch.gather(recent_position, dim=0, index=edge_index[1].unsqueeze(-1).expand(-1, dim)))
     edge_displacement /= metadata["default_connectivity_radius"]
-    recent_normal_velocity = normal_velocity_seq[:, -1]
-    normal_relative_velocity = (torch.gather(recent_normal_velocity, dim=0, index=edge_index[0].unsqueeze(-1).expand(-1, dim)) -
-                torch.gather(recent_normal_velocity, dim=0, index=edge_index[1].unsqueeze(-1).expand(-1, dim)))
+    depth = normal_velocity_seq.shape[1]
+    normal_relative_velocities = (torch.gather(normal_velocity_seq, dim=0, index=edge_index[0].view(-1, 1, 1).expand(-1, depth, 2)) -
+                torch.gather(normal_velocity_seq, dim=0, index=edge_index[1].view(-1, 1, 1).expand(-1, depth, 2)))
     edge_distance = torch.norm(edge_displacement, dim=-1, keepdim=True)
     edge_direction = torch.zeros_like(edge_displacement)
     find_ = torch.where(edge_distance > 0)[0]
@@ -137,13 +145,17 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         acceleration = None
 
     # return the graph with features
+
     graph = pyg.data.Data(
         x=particle_type,
         edge_index=edge_index,
-        edge_attr=torch.cat((edge_direction, norm_inv_edge_distance, normal_relative_velocity), dim=-1),
+        edge_attr=torch.cat((edge_direction, norm_inv_edge_distance, normal_relative_velocities.flatten(start_dim=1)), dim=-1),
         y=acceleration,
-        pos=torch.cat((normal_velocity_seq.reshape(velocity_seq.size(0), -1), norm_inv_distance_to_boundary.unsqueeze(1), direction_to_boundary, down_direction), dim=-1),
-        aux = has_opp_neighbour
+        pos=[], # no information inside initially; all information passed to edges
+        aux = {'has_opp_neighbour':has_opp_neighbour, 
+               'wall_in_parameters': torch.cat((norm_inv_distance_to_boundary.unsqueeze(1), normal_velocity_seq_to_wall, normal_velocity_seq_parallel_to_wall), dim=-1),
+               'direction_to_boundary':direction_to_boundary, 'direction_parallel_boundary':direction_parallel_boundary, 
+               'down_direction':down_direction}
     )
 
     return graph
