@@ -8,6 +8,7 @@ from data_processing import *
 from graph_NN_simulator import *
 import yaml
 from datetime import datetime
+import re
 
 '''
 This code is a PyTorch implementation of a graph neural network (GNN) simulator for particle dynamics, specifically designed to simulate the motion of particles in a 2D space. 
@@ -19,7 +20,7 @@ https://medium.com/stanford-cs224w/simulating-complex-physics-with-graph-network
 '''
 
 
-def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout_dataset, obstacle_bias=0.0, visualize=False, prefix=""):
+def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout_dataset, obstacle_bias=0.0, visualize=False, prefix="", v=0, total_steps_start=0):
     loss_fn = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(simulator.parameters(), lr=params["lr"])
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.1 ** (1 / 5e6))
@@ -29,15 +30,38 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
     eval_loss_list = []
     onestep_mse_list = []
     rollout_loss_list = []
-    total_step = 0
+    total_step = total_steps_start
+
+    file_path = os.path.join(training_stats_path, f"{prefix}_train_loss.txt")
+    if os.path.exists(file_path):
+        data = np.loadtxt(file_path, delimiter=",")  # Load two-column CSV data
+        for row in data:
+            train_loss_list.append((row[0], row[1]))
+
+    file_path = os.path.join(training_stats_path, f"{prefix}_eval_loss.txt")
+    if os.path.exists(file_path):
+        data = np.loadtxt(file_path, delimiter=",")  # Load two-column CSV data
+        for row in data:
+            eval_loss_list.append((row[0], row[1]))
+
+    file_path = os.path.join(training_stats_path, f"{prefix}_rollout_loss.txt")
+    if os.path.exists(file_path):
+        data = np.loadtxt(file_path, delimiter=",")  # Load two-column CSV data
+        for row in data:
+            rollout_loss_list.append((row[0], row[1]))
 
     if visualize:
         plt.ion()  # Turn on interactive mode
         fig, axes = plt.subplots(1,3, figsize=(16, 4))
 
-    for i in range(params["epoch"]):
+    epoch_passed = int(np.floor(total_steps_start/float(len(train_loader))))
+    residual = total_steps_start - epoch_passed*len(train_loader)
+    for i in range(epoch_passed,params["epoch"]):
         simulator.train()
-        progress_bar = tqdm(train_loader, desc=f"Epoch {i}")
+        if i==epoch_passed:
+            progress_bar = tqdm(train_loader, desc=f"Epoch {i}", initial=residual)
+        else:
+            progress_bar = tqdm(train_loader, desc=f"Epoch {i}")
         total_loss = 0
         batch_count = 0
         for data in progress_bar:
@@ -179,11 +203,20 @@ if __name__ == '__main__':
                                     window_size=model_params["window_size"])
     simulator = simulator.to(device)
 
+    print(session_name)
+
+    total_steps_start = 0
     if len(load_model_path)>0:
         checkpoint = torch.load(os.path.join(model_path, load_model_path))
         simulator.load_state_dict(checkpoint["model"])
+        # "2025-04-03_10_25_checkpoint_10000.pt"
+        print(load_model_path)
+        match = re.match(r"(.+?)_checkpoint_(\d+)\.pt", load_model_path)
+        if match:
+            session_name = match.group(1)  # "2025-04-03_10_25"
+            total_steps_start = int(match.group(2))  # 10000 as an integer
 
     # train the model
     metadata = read_metadata(data_path)
     train_loss_list, eval_loss_list, onestep_mse_list, rollout_mse_list = train(params, simulator, train_loader, valid_loader, metadata, valid_rollout_dataset, 
-                                                                                obstacle_bias=obstacle_bias, prefix=session_name, visualize=visualize)
+                                                                                obstacle_bias=obstacle_bias, prefix=session_name, visualize=visualize, total_steps_start=total_steps_start)
