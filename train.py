@@ -36,19 +36,35 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
     if os.path.exists(file_path):
         data = np.loadtxt(file_path, delimiter=",")  # Load two-column CSV data
         for row in data:
+            if row[0] >= total_steps_start:
+                break
             train_loss_list.append((row[0], row[1]))
+        with open(file_path, "w") as file:
+            for row in train_loss_list:
+                file.write(f"{row[0]},{row[1]}\n") 
+
 
     file_path = os.path.join(training_stats_path, f"{prefix}_eval_loss.txt")
     if os.path.exists(file_path):
         data = np.loadtxt(file_path, delimiter=",")  # Load two-column CSV data
         for row in data:
+            if row[0] >= total_steps_start:
+                break
             eval_loss_list.append((row[0], row[1]))
+        with open(file_path, "w") as file:
+            for row in eval_loss_list:
+                file.write(f"{row[0]},{row[1]}\n") 
 
     file_path = os.path.join(training_stats_path, f"{prefix}_rollout_loss.txt")
     if os.path.exists(file_path):
         data = np.loadtxt(file_path, delimiter=",")  # Load two-column CSV data
         for row in data:
+            if row[0] >= total_steps_start:
+                break
             rollout_loss_list.append((row[0], row[1]))
+        with open(file_path, "w") as file:
+            for row in rollout_loss_list:
+                file.write(f"{row[0]},{row[1]}\n") 
 
     if visualize:
         plt.ion()  # Turn on interactive mode
@@ -214,7 +230,7 @@ if __name__ == '__main__':
         match = re.match(r"(.+?)_checkpoint_(\d+)\.pt", load_model_path)
         if match:
             session_name = match.group(1)  # "2025-04-03_10_25"
-            total_steps_start = int(match.group(2))  # 10000 as an integer
+            total_steps_start = int(match.group(2))+1
 
     # train the model
     metadata = read_metadata(data_path)
