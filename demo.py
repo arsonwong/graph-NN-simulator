@@ -85,13 +85,16 @@ if __name__ == '__main__':
                                     window_size=model_params["window_size"])
     simulator = simulator.to(device)
 
-    checkpoint = torch.load(os.path.join(model_path, "2025-04-01_21_35_checkpoint_175000.pt"))
+    checkpoint = torch.load(os.path.join(model_path, "2025-04-03_13_50_checkpoint_10000.pt"))
     simulator.load_state_dict(checkpoint["model"])
     rollout_dataset = RolloutDataset(data_path, "valid")
     simulator.eval()
 
     rollout_data = rollout_dataset[1]
-    rollout_out = rollout(simulator, rollout_data, rollout_dataset.metadata, params["noise"])
+    rollout_start = 100
+    rollout_out = rollout(simulator, rollout_data, rollout_dataset.metadata, params["noise"], rollout_start=rollout_start, rollout_length=100)
+    length_ = rollout_out.size(1)
+    cropped_rollout_data_pos = rollout_data["position"][:,rollout_start:rollout_start+length_,:]
 
-    anim = visualize_pair(rollout_data["particle_type"], rollout_out, rollout_data["position"], rollout_dataset.metadata)
+    anim = visualize_pair(rollout_data["particle_type"], rollout_out, cropped_rollout_data_pos, rollout_dataset.metadata)
     plt.show()

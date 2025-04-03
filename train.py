@@ -87,29 +87,43 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
             pred = simulator(data)
             particle_type = data.x
             obstacle_particle_indices = torch.where(particle_type == KINEMATIC_PARTICLE_ID)[0]
+            pred[obstacle_particle_indices,:] = data.y[obstacle_particle_indices,:]
+            loss_overall = loss_fn(pred, data.y)
+            find_ = data.aux['particles_close_to_wall']
+            loss_close_to_wall = np.NaN
+            if len(find_) > 0:
+                loss_close_to_wall = loss_fn(pred[find_,:], data.y[find_,:])
+                loss_close_to_wall = loss_close_to_wall.item()
             find_ = torch.where(has_opp_neighbour)[0]
+            loss_with_obstacle = np.NaN
+            if len(find_) > 0:
+                loss_with_obstacle = loss_fn(pred[find_,:], data.y[find_,:])
+                loss_with_obstacle = loss_with_obstacle.item()
             pred[find_,:] *= 1.0+obstacle_bias
             data.y[find_,:] *= 1.0+obstacle_bias
-            pred[obstacle_particle_indices,:] = data.y[obstacle_particle_indices,:]
             loss = loss_fn(pred, data.y)
 
             loss.backward()
             optimizer.step()
             scheduler.step()
-            total_loss += loss.item()
+            total_loss += loss_overall.item()
             batch_count += 1
-            progress_bar.set_postfix({"loss": loss.item(), "avg_loss": total_loss / batch_count, "lr": optimizer.param_groups[0]["lr"]})
+            progress_bar.set_postfix({"loss": loss_overall.item(), "avg_loss": total_loss / batch_count, "lr": optimizer.param_groups[0]["lr"]})
             total_step += 1
 
             if visualize and total_step % 10 == 0:
-                train_loss_list.append((total_step, loss.item()))
+                train_loss_list.append((total_step, loss_overall.item(), loss_with_obstacle, loss_close_to_wall))
 
                 # Clear and update the plot
                 for ax in axes:
                     ax.clear()
 
                 if train_loss_list:
-                    axes[0].scatter(*zip(*train_loss_list))
+                    train_loss_list_ = np.array(train_loss_list)
+                    axes[0].scatter(train_loss_list_[:, 0], train_loss_list_[:, 1], c = 'black', label='Overall Loss')
+                    axes[0].scatter(train_loss_list_[:, 0], train_loss_list_[:, 2], c = 'red', label='Obstacle Loss')
+                    axes[0].scatter(train_loss_list_[:, 0], train_loss_list_[:, 3], c = 'blue', label='Close to Wall Loss')
+                    axes[0].legend()
                 axes[0].set_xlabel("Iterations")
                 axes[0].set_ylabel("Loss")
                 axes[0].set_title("Train Loss")
@@ -136,7 +150,7 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
             
             if total_step % 100 == 0:
                 with open(os.path.join(training_stats_path,f"{prefix}_train_loss.txt"), "a") as file:
-                    file.write(f"{total_step},{loss.item()}\n") 
+                    file.write(f"{total_step},{loss_overall.item()},{loss_with_obstacle},{loss_close_to_wall}\n") 
 
             # save model
             if total_step % params["save_interval"] == 0:
@@ -163,7 +177,8 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
             # do rollout on valid set
             if total_step % params["rollout_interval"] == 0:
                 simulator.eval()
-                rollout_loss, rollout_mse = rolloutMSE(simulator, valid_rollout_dataset, metadata, params["noise"])
+                rollout_loss, rollout_mse = rolloutMSE(simulator, valid_rollout_dataset, metadata, params["noise"],
+                                                       sets_to_test=list(range(1, 21)), random_start=True, rollout_length=20)
                 rollout_loss_list.append((total_step, rollout_loss))
                 tqdm.write(f"\nEval: Rollout Loss: {rollout_loss}, Rollout MSE: {rollout_mse}")
                 with open(os.path.join(training_stats_path,f"{prefix}_rollout_loss.txt"), "a") as file:
@@ -218,8 +233,6 @@ if __name__ == '__main__':
                                     n_mp_layers=model_params["n_mp_layers"], 
                                     window_size=model_params["window_size"])
     simulator = simulator.to(device)
-
-    print(session_name)
 
     total_steps_start = 0
     if len(load_model_path)>0:

@@ -101,6 +101,9 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     distance_to_boundary = torch.abs(distance_to_boundary)
     norm_distance_to_boundary = torch.clip(distance_to_boundary / metadata["default_connectivity_radius"], -1.0, 1.0)
     norm_distance_to_boundary, arg_min = torch.min(norm_distance_to_boundary, dim=-1)
+    particles_far_from_wall = torch.where((particle_type == KINEMATIC_PARTICLE_ID) | (norm_distance_to_boundary >= 1))[0]
+    particles_close_to_wall = torch.where((particle_type != KINEMATIC_PARTICLE_ID) & (norm_distance_to_boundary < 1))[0]
+
     # left wall, lower wall, right wall, upper wall
     # 1 if touching, 0 at default_connectivity_radius or beyond
     norm_inv_distance_to_boundary = (1/(norm_distance_to_boundary + 0.1) - 1/1.1)/(1/0.1-1/1.1)
@@ -152,10 +155,10 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         edge_attr=torch.cat((edge_direction, norm_inv_edge_distance, normal_relative_velocities.flatten(start_dim=1)), dim=-1),
         y=acceleration,
         pos=[], # no information inside initially; all information passed to edges
-        aux = {'has_opp_neighbour':has_opp_neighbour, 
+        aux = {'has_opp_neighbour':has_opp_neighbour, 'particles_close_to_wall': particles_close_to_wall,
                'wall_in_parameters': torch.cat((norm_inv_distance_to_boundary.unsqueeze(1), normal_velocity_seq_to_wall, normal_velocity_seq_parallel_to_wall), dim=-1),
                'direction_to_boundary':direction_to_boundary, 'direction_parallel_boundary':direction_parallel_boundary, 
-               'down_direction':down_direction}
+               'down_direction':down_direction,'particles_far_from_wall':particles_far_from_wall}
     )
 
     return graph
@@ -238,14 +241,14 @@ class RolloutDataset(pyg.data.Dataset):
         data = {"particle_type": particle_type, "position": position}
         return data
 
-def rollout(model, data, metadata, noise_std, rollout_length=None):
+def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=None):
     device = next(model.parameters()).device
     model.eval()
     window_size = model.window_size + 1
-    total_time = data["position"].size(1)
+    total_time = data["position"].size(1)-rollout_start
     if rollout_length is not None:
         total_time = rollout_length
-    traj = data["position"][:,:window_size,:]
+    traj = data["position"][:,rollout_start:rollout_start+window_size,:]
     # traj = traj.permute(1, 0, 2)
     particle_type = data["particle_type"]
     boundary = torch.tensor(metadata["bounds"])
@@ -265,7 +268,7 @@ def rollout(model, data, metadata, noise_std, rollout_length=None):
             
             # obstacle particles just follow the ground truth positions
             if len(obstacle_particle_indices) > 0:
-                new_position[obstacle_particle_indices,:] = data["position"][obstacle_particle_indices, time+window_size,:]
+                new_position[obstacle_particle_indices,:] = data["position"][obstacle_particle_indices, time+window_size+rollout_start,:]
 
             new_position[:,0] = torch.maximum(new_position[:,0], boundary[0,0])
             new_position[:,1] = torch.maximum(new_position[:,1], boundary[1,0])
@@ -301,7 +304,7 @@ def oneStepMSE(simulator, dataloader, metadata, noise, sets_to_test=500):
                 break
     return total_loss / batch_count, total_mse / batch_count
 
-def rolloutMSE(simulator, dataset, metadata, noise, sets_to_test=1):
+def rolloutMSE(simulator, dataset, metadata, noise, sets_to_test=[0], random_start=False, rollout_length=None):
     """Returns two values, loss and MSE"""
     total_loss = 0.0
     total_mse = 0.0
@@ -309,11 +312,18 @@ def rolloutMSE(simulator, dataset, metadata, noise, sets_to_test=1):
     simulator.eval()
     with torch.no_grad():
         scale = torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2 + noise ** 2)
-        for rollout_data in tqdm(dataset[:sets_to_test],desc="Roll out"):
-            rollout_out = rollout(simulator, rollout_data, dataset.metadata, noise)
-            mse = (rollout_out - rollout_data["position"]) ** 2
+        for rollout_data in tqdm(dataset[sets_to_test],desc="Roll out"):
+            rollout_start = 0
+            if random_start:
+                length_ = 100
+                if rollout_length is not None:
+                    length_ = rollout_length
+                rollout_start = np.random.randint(0, rollout_data["position"].size(1)-rollout_length-10)
+            rollout_out = rollout(simulator, rollout_data, dataset.metadata, noise, rollout_start=rollout_start, rollout_length=rollout_length)
+            length_ = rollout_out.size(1)
+            mse = (rollout_out - rollout_data["position"][:,rollout_start:rollout_start+length_,:]) ** 2
             mse = mse.sum(dim=-1).mean()
-            loss = ((rollout_out - rollout_data["position"]) / scale) ** 2
+            loss = ((rollout_out - rollout_data["position"][:,rollout_start:rollout_start+length_,:]) / scale) ** 2
             loss = loss.sum(dim=-1).mean()
             total_mse += mse.item()
             total_loss += loss.item()

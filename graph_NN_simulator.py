@@ -142,13 +142,14 @@ class LearnedSimulator(torch.nn.Module):
         direction_to_boundary = data.aux['direction_to_boundary']
         direction_parallel_boundary = data.aux['direction_parallel_boundary']
         down_direction = data.aux['down_direction']
-        # acceleration due to walls
+        particles_far_from_wall = data.aux['particles_far_from_wall']
 
         #acceleration due to gravity = constant * down direction
         out += self.gravity*down_direction
 
         #acceleration due to walls = some magnitude (proximity to wall, relative velocitIES) * wall direction
         wall_out = self.wall_in(wall_in_parameters)
-        out +=  wall_out[:,0].unsqueeze(1) * direction_to_boundary + wall_out[:,1].unsqueeze(1) * direction_parallel_boundary
+        wall_out[particles_far_from_wall,:] = 0.0
+        out += wall_out[:,0].unsqueeze(1) * direction_to_boundary + wall_out[:,1].unsqueeze(1) * direction_parallel_boundary
 
         return out
