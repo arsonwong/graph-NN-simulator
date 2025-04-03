@@ -72,14 +72,21 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
 
     epoch_passed = int(np.floor(total_steps_start/float(len(train_loader))))
     residual = total_steps_start - epoch_passed*len(train_loader)
+    loss_overall = 0.0
+    loss_overall_counter = 0
+    loss_close_to_wall = 0.0
+    loss_close_to_wall_counter = 0
+    loss_with_obstacle = 0.0    
+    loss_with_obstacle_counter = 0
+    
     for i in range(epoch_passed,params["epoch"]):
         simulator.train()
         if i==epoch_passed:
             progress_bar = tqdm(train_loader, desc=f"Epoch {i}", initial=residual)
         else:
             progress_bar = tqdm(train_loader, desc=f"Epoch {i}")
-        total_loss = 0
         batch_count = 0
+
         for data in progress_bar:
             optimizer.zero_grad()
             data = data.to(device)
@@ -88,17 +95,16 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
             particle_type = data.x
             obstacle_particle_indices = torch.where(particle_type == KINEMATIC_PARTICLE_ID)[0]
             pred[obstacle_particle_indices,:] = data.y[obstacle_particle_indices,:]
-            loss_overall = loss_fn(pred, data.y)
+            loss_overall += loss_fn(pred, data.y).item()*data.y.shape[0]
+            loss_overall_counter += data.y.shape[0]
             find_ = data.aux['particles_close_to_wall']
-            loss_close_to_wall = np.NaN
             if len(find_) > 0:
-                loss_close_to_wall = loss_fn(pred[find_,:], data.y[find_,:])
-                loss_close_to_wall = loss_close_to_wall.item()
+                loss_close_to_wall += loss_fn(pred[find_,:], data.y[find_,:]).item()*len(find_)
+                loss_close_to_wall_counter += len(find_)
             find_ = torch.where(has_opp_neighbour)[0]
-            loss_with_obstacle = np.NaN
             if len(find_) > 0:
-                loss_with_obstacle = loss_fn(pred[find_,:], data.y[find_,:])
-                loss_with_obstacle = loss_with_obstacle.item()
+                loss_with_obstacle += loss_fn(pred[find_,:], data.y[find_,:]).item()*len(find_)
+                loss_with_obstacle_counter += len(find_)
             pred[find_,:] *= 1.0+obstacle_bias
             data.y[find_,:] *= 1.0+obstacle_bias
             loss = loss_fn(pred, data.y)
@@ -106,13 +112,18 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
             loss.backward()
             optimizer.step()
             scheduler.step()
-            total_loss += loss_overall.item()
             batch_count += 1
-            progress_bar.set_postfix({"loss": loss_overall.item(), "avg_loss": total_loss / batch_count, "lr": optimizer.param_groups[0]["lr"]})
+            progress_bar.set_postfix({"loss": loss_overall/loss_overall_counter, "lr": optimizer.param_groups[0]["lr"]})
             total_step += 1
 
             if visualize and total_step % 10 == 0:
-                train_loss_list.append((total_step, loss_overall.item(), loss_with_obstacle, loss_close_to_wall))
+                train_loss_list.append((total_step, loss_overall/loss_overall_counter, loss_with_obstacle/loss_with_obstacle_counter, loss_close_to_wall/loss_close_to_wall_counter))
+                loss_overall = 0.0
+                loss_overall_counter = 0
+                loss_close_to_wall = 0.0
+                loss_close_to_wall_counter = 0
+                loss_with_obstacle = 0.0    
+                loss_with_obstacle_counter = 0
 
                 # Clear and update the plot
                 for ax in axes:
@@ -150,7 +161,7 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
             
             if total_step % 100 == 0:
                 with open(os.path.join(training_stats_path,f"{prefix}_train_loss.txt"), "a") as file:
-                    file.write(f"{total_step},{loss_overall.item()},{loss_with_obstacle},{loss_close_to_wall}\n") 
+                    file.write(f"{train_loss_list_[-1, 0]},{train_loss_list_[-1, 1]},{train_loss_list_[-1, 2]},{train_loss_list_[-1, 3]}\n") 
 
             # save model
             if total_step % params["save_interval"] == 0:
