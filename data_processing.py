@@ -49,8 +49,7 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         return tensor
     
     boundary = torch.tensor(metadata["bounds"])
-    down_direction = torch.zeros_like(target_position)
-    down_direction[:,1] = -1.0
+
     if rotation != 0:
         center = 0.5 * (boundary[:,0] + boundary[:,1])
         position_seq = position_seq - center
@@ -59,7 +58,7 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         target_position = target_position - center
         target_position = rotate(target_position, rotation) 
         target_position = target_position + center
-        down_direction = rotate(down_direction, rotation)
+        
 
     """Preprocess a trajectory and construct the graph"""
     # apply noise to the trajectory
@@ -72,6 +71,11 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     # calculate the velocities of particles
     recent_position = position_seq[:, -1]
     velocity_seq = position_seq[:, 1:] - position_seq[:, :-1]
+
+    down_direction = torch.zeros_like(recent_position)
+    down_direction[:,1] = -1.0
+    if rotation != 0:
+        down_direction = rotate(down_direction, rotation)
 
     # construct the graph based on the distances between particles, but end up making advacency matrix symmetrical
     n_particle = recent_position.size(0)

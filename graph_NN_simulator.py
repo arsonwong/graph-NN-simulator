@@ -17,10 +17,8 @@ https://medium.com/stanford-cs224w/simulating-complex-physics-with-graph-network
 1. Acceleration due to boundary is the same for each of the 4 walls, just rotated
 So, we don't distinguish the 4 walls, just return the closest distance and direction to a wall (done)
 We let the model learn the rotational symmetry by randomly rotating the examples to make may duplicates (done)
-2. Encourage more action = reaction 
-This we can do by making the message just a function of the edge feature (done)
-3. Expand edge feature to include relative velocities: this will help the model learn any damping (done)
-4. Not sure if this helps, but we can log direction and magnitudes, rather than displacement and magnitude
+2. Expand edge feature to include relative velocities: this will help the model learn any damping (done)
+3. Not sure if this helps, but we can log direction and magnitudes, rather than displacement and magnitude
 Moreover for distances, use 1/(distance+tiny_bias) to make things more "impenetratable"
 There will be higher sense of urgency to move away from each other (done)
 '''
@@ -58,7 +56,7 @@ class InteractionNetwork(pyg.nn.MessagePassing):
     https://proceedings.neurips.cc/paper/2016/hash/3147da8ab4a0437c15ef51a5cc7f2dc4-Abstract.html"""
     def __init__(self, hidden_size, layers):
         super().__init__()
-        self.lin_edge = MLP(hidden_size, hidden_size, hidden_size, layers)
+        self.lin_edge = MLP(hidden_size * 3, hidden_size, hidden_size, layers)
         self.lin_node = MLP(hidden_size * 2, hidden_size, hidden_size, layers)
 
     def forward(self, x, edge_index, edge_feature):
@@ -69,9 +67,8 @@ class InteractionNetwork(pyg.nn.MessagePassing):
         return node_out, edge_out
 
     def message(self, x_i, x_j, edge_feature):
-        # x = torch.cat((x_i, x_j, edge_feature), dim=-1)
-        # x = self.lin_edge(x)
-        x = self.lin_edge(edge_feature)
+        x = torch.cat((x_i, x_j, edge_feature), dim=-1)
+        x = self.lin_edge(x)
         return x
 
     def aggregate(self, inputs, index, dim_size=None):
@@ -92,7 +89,7 @@ class LearnedSimulator(torch.nn.Module):
         super().__init__()
         self.window_size = window_size
         self.embed_type = torch.nn.Embedding(num_particle_types, particle_type_dim)
-        self.node_in = MLP(particle_type_dim + dim * (window_size + 2) - 1, hidden_size, hidden_size, 3)
+        self.node_in = MLP(particle_type_dim + dim * (window_size + 2) + 1, hidden_size, hidden_size, 3)
         self.edge_in = MLP(2*dim + 1, hidden_size, hidden_size, 3)
         self.node_out = MLP(hidden_size, hidden_size, dim, 3, layernorm=False)
         self.n_mp_layers = n_mp_layers
