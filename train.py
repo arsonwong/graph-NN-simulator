@@ -38,10 +38,10 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
         for row in data:
             if row[0] >= total_steps_start:
                 break
-            train_loss_list.append((row[0], row[1]))
+            train_loss_list.append((row[0], row[1], row[2], row[3]))
         with open(file_path, "w") as file:
             for row in train_loss_list:
-                file.write(f"{row[0]},{row[1]}\n") 
+                file.write(f"{row[0]},{row[1]},{row[2]},{row[3]}\n") 
 
 
     file_path = os.path.join(training_stats_path, f"{prefix}_eval_loss.txt")
@@ -233,7 +233,7 @@ if __name__ == '__main__':
     session_name += datetime.now().strftime("%Y-%m-%d_%H_%M")
 
     # load dataset
-    train_dataset = OneStepDataset(data_path, "train", noise_std=params["noise"], random_rotation=True)
+    train_dataset = OneStepDataset(data_path, "train", noise_std=params["noise"], random_rotation=False)
     valid_dataset = OneStepDataset(data_path, "valid", noise_std=params["noise"])
     train_loader = pyg.loader.DataLoader(train_dataset, batch_size=params["batch_size"], shuffle=True, pin_memory=True, num_workers=1)
     valid_loader = pyg.loader.DataLoader(valid_dataset, batch_size=params["batch_size"], shuffle=True, pin_memory=True, num_workers=1)

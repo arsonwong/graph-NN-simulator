@@ -2,6 +2,7 @@ import torch
 import torch_geometric as pyg
 import math
 import torch_scatter
+from data_processing import KINEMATIC_PARTICLE_ID
 
 '''
 This code is a PyTorch implementation of a graph neural network (GNN) simulator for particle dynamics, specifically designed to simulate the motion of particles in a 2D space. 
@@ -33,6 +34,8 @@ change to
 acceleration due to neighbours = function (relative velocitIES, relative position)
 where (relative velocitIES, relative position) is passed to the edge
 and the node just embeds a blank thing at the start (no information inside)
+
+Also, separate force due to obstacles and force due to swarm neighbours
 
 acceleration due to gravity = constant * down direction
 
@@ -108,14 +111,21 @@ class LearnedSimulator(torch.nn.Module):
     ):
         super().__init__()
         self.window_size = window_size
-        self.embed_type = torch.nn.Embedding(num_particle_types, particle_type_dim)
-        self.node_in = MLP(particle_type_dim, hidden_size, hidden_size, 3)
-        self.edge_in = MLP(dim*(window_size+1) + 1, hidden_size, hidden_size, 3)
-        self.node_out = MLP(hidden_size, hidden_size, dim, 3, layernorm=False)
+        self.embed_type1 = torch.nn.Embedding(num_particle_types, particle_type_dim)
+        self.node_in1 = MLP(particle_type_dim, hidden_size//2, hidden_size//2, 3)
+        self.embed_type2 = torch.nn.Embedding(num_particle_types, particle_type_dim)
+        self.node_in2 = MLP(particle_type_dim, hidden_size//2, hidden_size//2, 3)
+        self.edge_in1 = MLP(dim*(window_size+1) + 1, hidden_size//2, hidden_size//2, 3)
+        self.node_out1 = MLP(hidden_size//2, hidden_size//2, dim, 3, layernorm=False)
+        self.edge_in2 = MLP(dim*(window_size+1) + 1, hidden_size//2, hidden_size//2, 3)
+        self.node_out2 = MLP(hidden_size//2, hidden_size//2, dim, 3, layernorm=False)
         self.wall_in = MLP(dim*window_size + 1, hidden_size, dim, 3)
         self.n_mp_layers = n_mp_layers
-        self.layers = torch.nn.ModuleList([InteractionNetwork(
-            hidden_size, 3
+        self.layers1 = torch.nn.ModuleList([InteractionNetwork(
+            hidden_size//2, 3
+        ) for _ in range(n_mp_layers)])
+        self.layers2 = torch.nn.ModuleList([InteractionNetwork(
+            hidden_size//2, 3
         ) for _ in range(n_mp_layers)])
 
         self.gravity = torch.nn.Parameter(torch.tensor(0.0))
@@ -123,20 +133,37 @@ class LearnedSimulator(torch.nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        torch.nn.init.xavier_uniform_(self.embed_type.weight)
+        torch.nn.init.xavier_uniform_(self.embed_type1.weight)
+        torch.nn.init.xavier_uniform_(self.embed_type2.weight)
 
     def forward(self, data: pyg.data.Data) -> torch.Tensor:
         # pre-processing
         # node feature: combine categorial feature data.x and contiguous feature data.pos.
-        node_feature = self.embed_type(data.x)
-        node_feature = self.node_in(node_feature)
-        edge_feature = self.edge_in(data.edge_attr)
+        node_feature1 = self.embed_type1(data.x)
+        node_feature2 = self.embed_type2(data.x)
+        node_feature1 = self.node_in1(node_feature1)
+        node_feature2 = self.node_in2(node_feature2)
+        edge_feature1 = self.edge_in1(data.edge_attr)
+        edge_feature2 = self.edge_in2(data.edge_attr2)
         # stack of GNN layers
         for i in range(self.n_mp_layers):
-            node_feature, edge_feature = self.layers[i](node_feature, data.edge_index, edge_feature=edge_feature)
+            node_feature1, edge_feature1 = self.layers1[i](node_feature1, data.edge_index, edge_feature=edge_feature1)
+            node_feature2, edge_feature2 = self.layers2[i](node_feature2, data.edge_index2, edge_feature=edge_feature2)
         # post-processing
         # acceleration due to neighbours
-        out = self.node_out(node_feature)
+        swarm_acceleration = self.node_out1(node_feature1)
+        find_ = torch.where(data.x == KINEMATIC_PARTICLE_ID)[0]
+        swarm_acceleration[find_, :] = 0.0
+        avg_swarm_acceleration = swarm_acceleration.mean(dim=0)
+        swarm_acceleration = swarm_acceleration - avg_swarm_acceleration.unsqueeze(0)
+
+        obstacle_acceleration = self.node_out2(node_feature2)
+        has_opp_neighbour = data.aux['has_opp_neighbour']
+        obstacle_acceleration[find_, :] = 0.0
+        find_ = torch.where(has_opp_neighbour==0)[0]
+        obstacle_acceleration[find_, :] = 0.0
+
+        out = swarm_acceleration + obstacle_acceleration
 
         wall_in_parameters = data.aux['wall_in_parameters']
         direction_to_boundary = data.aux['direction_to_boundary']

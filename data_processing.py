@@ -87,6 +87,11 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     edge_index = torch.cat([edge_index, edge_index2], dim=1)
     edge_index = torch.unique(edge_index, dim=1)
 
+    find_ = torch.where((particle_type[edge_index[0,:]] != KINEMATIC_PARTICLE_ID) & (particle_type[edge_index[1,:]] != KINEMATIC_PARTICLE_ID))[0]
+    swarm_edges = edge_index[:,find_]
+    find_ = torch.where((particle_type[edge_index[0,:]] == KINEMATIC_PARTICLE_ID) | (particle_type[edge_index[1,:]] == KINEMATIC_PARTICLE_ID))[0]
+    non_swarm_edges = edge_index[:,find_]
+
     nodes_with_opp_neighbour = edge_index2.flatten()
     nodes_with_opp_neighbour = torch.unique(nodes_with_opp_neighbour)
     has_opp_neighbour = torch.zeros(n_particle, dtype=torch.bool)
@@ -94,7 +99,7 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     has_opp_neighbour[obstacle_particle_indices] = False 
     
     # node-level features: velocity, distance to the boundary
-    normal_velocity_seq = (velocity_seq - torch.tensor(metadata["vel_mean"])) / torch.sqrt(torch.tensor(metadata["vel_std"]) ** 2 + noise_std ** 2)
+    normal_velocity_seq = velocity_seq / torch.sqrt(torch.tensor(metadata["vel_std"]) ** 2 + noise_std ** 2)
     distance_to_lower_boundary = recent_position - boundary[:, 0]
     distance_to_upper_boundary = boundary[:, 1] - recent_position
     distance_to_boundary = torch.cat((distance_to_lower_boundary, distance_to_upper_boundary), dim=-1)
@@ -126,24 +131,36 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
 
     # edge-level features: displacement, distance
     dim = recent_position.size(-1)
-    edge_displacement = (torch.gather(recent_position, dim=0, index=edge_index[0].unsqueeze(-1).expand(-1, dim)) -
-                   torch.gather(recent_position, dim=0, index=edge_index[1].unsqueeze(-1).expand(-1, dim)))
-    edge_displacement /= metadata["default_connectivity_radius"]
+    edge_displacement1 = (torch.gather(recent_position, dim=0, index=swarm_edges[0].unsqueeze(-1).expand(-1, dim)) -
+                   torch.gather(recent_position, dim=0, index=swarm_edges[1].unsqueeze(-1).expand(-1, dim)))
+    edge_displacement1 /= metadata["default_connectivity_radius"]
     depth = normal_velocity_seq.shape[1]
-    normal_relative_velocities = (torch.gather(normal_velocity_seq, dim=0, index=edge_index[0].view(-1, 1, 1).expand(-1, depth, 2)) -
-                torch.gather(normal_velocity_seq, dim=0, index=edge_index[1].view(-1, 1, 1).expand(-1, depth, 2)))
-    edge_distance = torch.norm(edge_displacement, dim=-1, keepdim=True)
-    edge_direction = torch.zeros_like(edge_displacement)
-    find_ = torch.where(edge_distance > 0)[0]
-    edge_direction[find_, :] = edge_displacement[find_, :] / edge_distance[find_]
-    norm_inv_edge_distance = (1/(edge_distance + 0.1) - 1/1.1)/(1/0.1-1/1.1)
+    normal_relative_velocities1 = (torch.gather(normal_velocity_seq, dim=0, index=swarm_edges[0].view(-1, 1, 1).expand(-1, depth, 2)) -
+                torch.gather(normal_velocity_seq, dim=0, index=swarm_edges[1].view(-1, 1, 1).expand(-1, depth, 2)))
+    edge_distance1 = torch.norm(edge_displacement1, dim=-1, keepdim=True)
+    edge_direction1 = torch.zeros_like(edge_displacement1)
+    find_ = torch.where(edge_distance1 > 0)[0]
+    edge_direction1[find_, :] = edge_displacement1[find_, :] / edge_distance1[find_]
+    norm_inv_edge_distance1 = (1/(edge_distance1 + 0.1) - 1/1.1)/(1/0.1-1/1.1)
+
+    edge_displacement2 = (torch.gather(recent_position, dim=0, index=non_swarm_edges[0].unsqueeze(-1).expand(-1, dim)) -
+                   torch.gather(recent_position, dim=0, index=non_swarm_edges[1].unsqueeze(-1).expand(-1, dim)))
+    edge_displacement2 /= metadata["default_connectivity_radius"]
+    depth = normal_velocity_seq.shape[1]
+    normal_relative_velocities2 = (torch.gather(normal_velocity_seq, dim=0, index=non_swarm_edges[0].view(-1, 1, 1).expand(-1, depth, 2)) -
+                torch.gather(normal_velocity_seq, dim=0, index=non_swarm_edges[1].view(-1, 1, 1).expand(-1, depth, 2)))
+    edge_distance2 = torch.norm(edge_displacement2, dim=-1, keepdim=True)
+    edge_direction2 = torch.zeros_like(edge_displacement2)
+    find_ = torch.where(edge_distance2 > 0)[0]
+    edge_direction2[find_, :] = edge_displacement2[find_, :] / edge_distance2[find_]
+    norm_inv_edge_distance2 = (1/(edge_distance2 + 0.1) - 1/1.1)/(1/0.1-1/1.1)
 
     # ground truth for training
     if target_position is not None:
         last_velocity = velocity_seq[:, -1]
         next_velocity = target_position + position_noise[:, -1] - recent_position
         acceleration = next_velocity - last_velocity
-        acceleration = (acceleration - torch.tensor(metadata["acc_mean"])) / torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2 + noise_std ** 2)
+        acceleration = acceleration / torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2 + noise_std ** 2)
     else:
         acceleration = None
 
@@ -151,8 +168,10 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
 
     graph = pyg.data.Data(
         x=particle_type,
-        edge_index=edge_index,
-        edge_attr=torch.cat((edge_direction, norm_inv_edge_distance, normal_relative_velocities.flatten(start_dim=1)), dim=-1),
+        edge_index=swarm_edges,
+        edge_attr=torch.cat((edge_direction1, norm_inv_edge_distance1, normal_relative_velocities1.flatten(start_dim=1)), dim=-1),
+        edge_index2=non_swarm_edges,
+        edge_attr2=torch.cat((edge_direction2, norm_inv_edge_distance2, normal_relative_velocities2.flatten(start_dim=1)), dim=-1),
         y=acceleration,
         pos=[], # no information inside initially; all information passed to edges
         aux = {'has_opp_neighbour':has_opp_neighbour, 'particles_close_to_wall': particles_close_to_wall,
@@ -259,7 +278,7 @@ def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=No
             graph = preprocess(particle_type, traj[:, -window_size:], None, metadata, 0.0)
             graph = graph.to(device)
             acceleration = model(graph).cpu()
-            acceleration = acceleration * torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2 + noise_std ** 2) + torch.tensor(metadata["acc_mean"])
+            acceleration = acceleration * torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2 + noise_std ** 2)
 
             recent_position = traj[:, -1]
             recent_velocity = recent_position - traj[:, -2]
