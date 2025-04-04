@@ -160,7 +160,7 @@ class LearnedSimulator(torch.nn.Module):
         obstacle_acceleration = self.node_out2(node_feature2)
         has_opp_neighbour = data.aux['has_opp_neighbour']
         obstacle_acceleration[find_, :] = 0.0
-        find_ = torch.where(has_opp_neighbour==0)[0]
+        find_ = torch.where(has_opp_neighbour==False)[0]
         obstacle_acceleration[find_, :] = 0.0
 
         out = swarm_acceleration + obstacle_acceleration
