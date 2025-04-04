@@ -92,6 +92,7 @@ class InteractionNetwork(pyg.nn.MessagePassing):
                 node_out_blank = 0.5*(self.lin_node(input)-self.lin_node(-input))
             else:
                 node_out_blank = self.lin_node(input)
+            node_out_blank = x + node_out_blank
             return node_out_blank, None
         
         edge_out, aggr = self.propagate(edge_index, x=(x, x), edge_feature=edge_feature)
