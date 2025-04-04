@@ -81,8 +81,14 @@ class InteractionNetwork(pyg.nn.MessagePassing):
         super().__init__()
         self.lin_edge = MLP(hidden_size * 3, hidden_size, hidden_size, layers)
         self.lin_node = MLP(hidden_size * 2, hidden_size, hidden_size, layers)
+        self.hidden_size = hidden_size
 
-    def forward(self, x, edge_index, edge_feature):
+    def forward(self, x, edge_index, edge_feature, blank=False):
+        if blank:
+            aggr_blank = torch.zeros((x.shape[0], self.hidden_size), device=x.device)
+            node_out_blank = self.lin_node(torch.cat((x, aggr_blank), dim=-1))
+            return node_out_blank, None
+        
         edge_out, aggr = self.propagate(edge_index, x=(x, x), edge_feature=edge_feature)
         node_out = self.lin_node(torch.cat((x, aggr), dim=-1))
         edge_out = edge_feature + edge_out
@@ -145,23 +151,29 @@ class LearnedSimulator(torch.nn.Module):
         node_feature2 = self.node_in2(node_feature2)
         edge_feature1 = self.edge_in1(data.edge_attr)
         edge_feature2 = self.edge_in2(data.edge_attr2)
+    
+        find_ = torch.where(data.x != KINEMATIC_PARTICLE_ID)[0]
+        blank_x = (torch.ones((1), device=data.x.device) * data.x[find_[0]]).to(torch.int64)
+        blank_node_feature1 = self.embed_type1(blank_x)
+        blank_node_feature2 = self.embed_type2(blank_x)
+        blank_node_feature1 = self.node_in1(blank_node_feature1)
+        blank_node_feature2 = self.node_in2(blank_node_feature2)
+
         # stack of GNN layers
         for i in range(self.n_mp_layers):
             node_feature1, edge_feature1 = self.layers1[i](node_feature1, data.edge_index, edge_feature=edge_feature1)
             node_feature2, edge_feature2 = self.layers2[i](node_feature2, data.edge_index2, edge_feature=edge_feature2)
+            blank_node_feature1, _ = self.layers1[i](blank_node_feature1, None, edge_feature=None, blank=True)
+            blank_node_feature2, _ = self.layers2[i](blank_node_feature2, None, edge_feature=None, blank=True)
         # post-processing
         # acceleration due to neighbours
         swarm_acceleration = self.node_out1(node_feature1)
-        find_ = torch.where(data.x == KINEMATIC_PARTICLE_ID)[0]
-        swarm_acceleration[find_, :] = 0.0
-        avg_swarm_acceleration = swarm_acceleration.mean(dim=0)
-        swarm_acceleration = swarm_acceleration - avg_swarm_acceleration.unsqueeze(0)
+        blank_ = self.node_out1(blank_node_feature1)
+        swarm_acceleration -= blank_
 
         obstacle_acceleration = self.node_out2(node_feature2)
-        has_opp_neighbour = data.aux['has_opp_neighbour']
-        obstacle_acceleration[find_, :] = 0.0
-        find_ = torch.where(has_opp_neighbour==False)[0]
-        obstacle_acceleration[find_, :] = 0.0
+        blank_ = self.node_out2(blank_node_feature2)
+        obstacle_acceleration -= blank_
 
         out = swarm_acceleration + obstacle_acceleration
 

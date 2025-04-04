@@ -99,7 +99,7 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     has_opp_neighbour[obstacle_particle_indices] = False 
     
     # node-level features: velocity, distance to the boundary
-    normal_velocity_seq = velocity_seq / torch.sqrt(torch.tensor(metadata["vel_std"]) ** 2 + noise_std ** 2)
+    normal_velocity_seq = velocity_seq / torch.sqrt(torch.sum(torch.tensor(metadata["vel_std"]) ** 2) + noise_std ** 2)
     distance_to_lower_boundary = recent_position - boundary[:, 0]
     distance_to_upper_boundary = boundary[:, 1] - recent_position
     distance_to_boundary = torch.cat((distance_to_lower_boundary, distance_to_upper_boundary), dim=-1)
@@ -160,7 +160,7 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         last_velocity = velocity_seq[:, -1]
         next_velocity = target_position + position_noise[:, -1] - recent_position
         acceleration = next_velocity - last_velocity
-        acceleration = acceleration / torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2 + noise_std ** 2)
+        acceleration = acceleration / torch.sqrt(torch.sum(torch.tensor(metadata["acc_std"]) ** 2) + noise_std ** 2)
     else:
         acceleration = None
 
@@ -278,7 +278,7 @@ def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=No
             graph = preprocess(particle_type, traj[:, -window_size:], None, metadata, 0.0)
             graph = graph.to(device)
             acceleration = model(graph).cpu()
-            acceleration = acceleration * torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2 + noise_std ** 2)
+            acceleration = acceleration * torch.sqrt(torch.sum(torch.tensor(metadata["acc_std"]) ** 2) + noise_std ** 2)
 
             recent_position = traj[:, -1]
             recent_velocity = recent_position - traj[:, -2]
@@ -305,7 +305,7 @@ def oneStepMSE(simulator, dataloader, metadata, noise, sets_to_test=500):
     batch_count = 0
     simulator.eval()
     with torch.no_grad():
-        scale = torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2 + noise ** 2).cuda()
+        scale = torch.sqrt(torch.sum(torch.tensor(metadata["acc_std"]) ** 2) + noise ** 2).cuda()
         for data in tqdm(dataloader,desc="Validating"):
             data = data.cuda()
             particle_type = data.x
@@ -330,7 +330,7 @@ def rolloutMSE(simulator, dataset, metadata, noise, sets_to_test=[0], random_sta
     batch_count = 0
     simulator.eval()
     with torch.no_grad():
-        scale = torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2 + noise ** 2)
+        scale = torch.sqrt(torch.sum(torch.tensor(metadata["acc_std"]) ** 2) + noise ** 2)
         for rollout_data in tqdm(dataset[sets_to_test],desc="Roll out"):
             rollout_start = 0
             if random_start:
