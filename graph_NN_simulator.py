@@ -77,27 +77,40 @@ class MLP(torch.nn.Module):
 class InteractionNetwork(pyg.nn.MessagePassing):
     """Interaction Network as proposed in this paper: 
     https://proceedings.neurips.cc/paper/2016/hash/3147da8ab4a0437c15ef51a5cc7f2dc4-Abstract.html"""
-    def __init__(self, hidden_size, layers):
+    def __init__(self, hidden_size, layers, antisymmetric=False):
         super().__init__()
         self.lin_edge = MLP(hidden_size * 3, hidden_size, hidden_size, layers)
         self.lin_node = MLP(hidden_size * 2, hidden_size, hidden_size, layers)
         self.hidden_size = hidden_size
+        self.anti_symmetric = antisymmetric
 
     def forward(self, x, edge_index, edge_feature, blank=False):
         if blank:
             aggr_blank = torch.zeros((x.shape[0], self.hidden_size), device=x.device)
-            node_out_blank = self.lin_node(torch.cat((x, aggr_blank), dim=-1))
+            input = torch.cat((x, aggr_blank), dim=-1)
+            if self.anti_symmetric:
+                node_out_blank = 0.5*(self.lin_node(input)-self.lin_node(-input))
+            else:
+                node_out_blank = self.lin_node(input)
             return node_out_blank, None
         
         edge_out, aggr = self.propagate(edge_index, x=(x, x), edge_feature=edge_feature)
-        node_out = self.lin_node(torch.cat((x, aggr), dim=-1))
+        input = torch.cat((x, aggr), dim=-1)
+        if self.anti_symmetric:
+            node_out = 0.5*(self.lin_node(input)-self.lin_node(-input))
+        else:
+            node_out = self.lin_node(input)
         edge_out = edge_feature + edge_out
         node_out = x + node_out
         return node_out, edge_out
 
     def message(self, x_i, x_j, edge_feature):
-        x = torch.cat((x_i, x_j, edge_feature), dim=-1)
-        x = self.lin_edge(x)
+        if self.anti_symmetric:
+            x = torch.cat((x_i-x_j, x_j-x_i, edge_feature), dim=-1)
+            x = 0.5*(self.lin_edge(x)-self.lin_edge(-x))
+        else:
+            x = torch.cat((x_i, x_j, edge_feature), dim=-1)
+            x = self.lin_edge(x)
         return x
 
     def aggregate(self, inputs, index, dim_size=None):
@@ -116,19 +129,18 @@ class LearnedSimulator(torch.nn.Module):
         window_size=5, # the model looks into W frames before the frame to be predicted
     ):
         super().__init__()
+        self.hidden_size = hidden_size
         self.window_size = window_size
-        self.embed_type1 = torch.nn.Embedding(num_particle_types, particle_type_dim)
-        self.node_in1 = MLP(particle_type_dim, hidden_size//2, hidden_size//2, 3)
         self.embed_type2 = torch.nn.Embedding(num_particle_types, particle_type_dim)
         self.node_in2 = MLP(particle_type_dim, hidden_size//2, hidden_size//2, 3)
-        self.edge_in1 = MLP(dim*(window_size+1) + 1, hidden_size//2, hidden_size//2, 3)
+        self.edge_in1 = MLP(dim*(window_size+2), hidden_size//2, hidden_size//2, 3)
         self.node_out1 = MLP(hidden_size//2, hidden_size//2, dim, 3, layernorm=False)
-        self.edge_in2 = MLP(dim*(window_size+1) + 1, hidden_size//2, hidden_size//2, 3)
+        self.edge_in2 = MLP(dim*(window_size+2), hidden_size//2, hidden_size//2, 3)
         self.node_out2 = MLP(hidden_size//2, hidden_size//2, dim, 3, layernorm=False)
         self.wall_in = MLP(dim*window_size + 1, hidden_size, dim, 3)
         self.n_mp_layers = n_mp_layers
         self.layers1 = torch.nn.ModuleList([InteractionNetwork(
-            hidden_size//2, 3
+            hidden_size//2, 3, antisymmetric=True
         ) for _ in range(n_mp_layers)])
         self.layers2 = torch.nn.ModuleList([InteractionNetwork(
             hidden_size//2, 3
@@ -139,24 +151,21 @@ class LearnedSimulator(torch.nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        torch.nn.init.xavier_uniform_(self.embed_type1.weight)
         torch.nn.init.xavier_uniform_(self.embed_type2.weight)
 
     def forward(self, data: pyg.data.Data) -> torch.Tensor:
         # pre-processing
         # node feature: combine categorial feature data.x and contiguous feature data.pos.
-        node_feature1 = self.embed_type1(data.x)
         node_feature2 = self.embed_type2(data.x)
-        node_feature1 = self.node_in1(node_feature1)
+        node_feature1 = torch.zeros((data.x.shape[0],self.hidden_size//2)).to(data.x.device)
         node_feature2 = self.node_in2(node_feature2)
-        edge_feature1 = self.edge_in1(data.edge_attr)
+        edge_feature1 = 0.5*(self.edge_in1(data.edge_attr)-self.edge_in1(-data.edge_attr)) # anti-symmetric
         edge_feature2 = self.edge_in2(data.edge_attr2)
     
         find_ = torch.where(data.x != KINEMATIC_PARTICLE_ID)[0]
         blank_x = (torch.ones((1), device=data.x.device) * data.x[find_[0]]).to(torch.int64)
-        blank_node_feature1 = self.embed_type1(blank_x)
+        blank_node_feature1 = torch.zeros((data.x.shape[0],self.hidden_size//2)).to(data.x.device)
         blank_node_feature2 = self.embed_type2(blank_x)
-        blank_node_feature1 = self.node_in1(blank_node_feature1)
         blank_node_feature2 = self.node_in2(blank_node_feature2)
 
         # stack of GNN layers
@@ -167,7 +176,7 @@ class LearnedSimulator(torch.nn.Module):
             blank_node_feature2, _ = self.layers2[i](blank_node_feature2, None, edge_feature=None, blank=True)
         # post-processing
         # acceleration due to neighbours
-        swarm_acceleration = self.node_out1(node_feature1)
+        swarm_acceleration = 0.5*(self.node_out1(node_feature1)-self.node_out1(-node_feature1)) # anti-symmetric
         blank_ = self.node_out1(blank_node_feature1)
         swarm_acceleration -= blank_
 
