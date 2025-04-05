@@ -2,7 +2,9 @@ import torch
 import torch_geometric as pyg
 import math
 import torch_scatter
-from data_processing import KINEMATIC_PARTICLE_ID
+import yaml
+import os
+import json
 
 '''
 This code is a PyTorch implementation of a graph neural network (GNN) simulator for particle dynamics, specifically designed to simulate the motion of particles in a 2D space. 
@@ -45,6 +47,163 @@ so that friction can be captured
 
 total acceleration = acceleration due to neighbours + acceleration due to gravity + acceleration due to walls'
 '''
+
+KINEMATIC_PARTICLE_ID = 3
+
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
+    max_neighbours = config["model"]["max_neighbours"]
+
+def read_metadata(data_path):
+  with open(os.path.join(data_path, 'metadata.json'), 'rt') as fp:
+    return json.loads(fp.read())
+
+def rotate(tensor, rotation):
+    if rotation == 1: # CCW
+        tensor = tensor[..., [1, 0]]
+        tensor[...,0] = -tensor[..., 0]
+    elif rotation == 2: # 180
+        tensor = -tensor
+    elif rotation == 3: # CW
+        tensor = tensor[..., [1, 0]]
+        tensor[...,1] = -tensor[..., 1]
+    return tensor
+    
+def preprocess(particle_type, position_seq, target_position, metadata, noise_std, rotation=0):
+    def generate_noise(position_seq, noise_std):
+        """Generate noise for a trajectory"""
+        velocity_seq = position_seq[:, 1:] - position_seq[:, :-1]
+        time_steps = velocity_seq.size(1)
+        velocity_noise = torch.randn_like(velocity_seq) * (noise_std / time_steps ** 0.5)
+        velocity_noise = velocity_noise.cumsum(dim=1)
+        position_noise = velocity_noise.cumsum(dim=1)
+        position_noise = torch.cat((torch.zeros_like(position_noise)[:, 0:1], position_noise), dim=1)
+        return position_noise
+    
+    boundary = torch.tensor(metadata["bounds"])
+
+    down_direction = torch.zeros((position_seq.shape[0],metadata["dim"]))
+    down_direction[:,1] = -1.0
+    if rotation != 0:
+        down_direction = rotate(down_direction, rotation)
+        center = 0.5 * (boundary[:,0] + boundary[:,1])
+        position_seq = position_seq - center
+        position_seq = rotate(position_seq, rotation)
+        position_seq = position_seq + center
+        if target_position is not None:
+            target_position = target_position - center
+            target_position = rotate(target_position, rotation) 
+            target_position = target_position + center
+        
+    """Preprocess a trajectory and construct the graph"""
+    # apply noise to the trajectory
+    position_noise = generate_noise(position_seq, noise_std)
+    # obstacle particles are not allowed to move
+    obstacle_particle_indices = torch.where(particle_type == KINEMATIC_PARTICLE_ID)[0]
+    position_noise[obstacle_particle_indices, :] = 0.0
+    position_seq = position_seq + position_noise
+
+    # calculate the velocities of particles
+    recent_position = position_seq[:, -1]
+    velocity_seq = position_seq[:, 1:] - position_seq[:, :-1]
+
+    # construct the graph based on the distances between particles, but end up making advacency matrix symmetrical
+    n_particle = recent_position.size(0)
+    edge_index = pyg.nn.radius_graph(recent_position, metadata["default_connectivity_radius"], loop=False, max_num_neighbors=max_neighbours)
+    edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)
+    edge_index2 = pyg.nn.radius_graph(recent_position, metadata["default_connectivity_radius"], loop=False)
+    opposite_particles = torch.where(particle_type[edge_index2[0,:]] != particle_type[edge_index2[1,:]])[0]
+    edge_index2 = edge_index2[:,opposite_particles]
+    edge_index = torch.cat([edge_index, edge_index2], dim=1)
+    edge_index = torch.unique(edge_index, dim=1)
+
+    find_ = torch.where((particle_type[edge_index[0,:]] != KINEMATIC_PARTICLE_ID) & (particle_type[edge_index[1,:]] != KINEMATIC_PARTICLE_ID))[0]
+    swarm_edges = edge_index[:,find_]
+    find_ = torch.where((particle_type[edge_index[0,:]] == KINEMATIC_PARTICLE_ID) | (particle_type[edge_index[1,:]] == KINEMATIC_PARTICLE_ID))[0]
+    non_swarm_edges = edge_index[:,find_]
+
+    nodes_with_opp_neighbour = edge_index2.flatten()
+    nodes_with_opp_neighbour = torch.unique(nodes_with_opp_neighbour)
+    has_opp_neighbour = torch.zeros(n_particle, dtype=torch.bool)
+    has_opp_neighbour[nodes_with_opp_neighbour] = True   
+    has_opp_neighbour[obstacle_particle_indices] = False 
+    
+    # node-level features: velocity, distance to the boundary
+    normal_velocity_seq = velocity_seq / torch.sqrt(torch.sum(torch.tensor(metadata["vel_std"]) ** 2) + noise_std ** 2)
+    distance_to_lower_boundary = recent_position - boundary[:, 0]
+    distance_to_upper_boundary = boundary[:, 1] - recent_position
+    distance_to_boundary = torch.cat((distance_to_lower_boundary, distance_to_upper_boundary), dim=-1)
+    distance_to_boundary = torch.abs(distance_to_boundary)
+    norm_distance_to_boundary = torch.clip(distance_to_boundary / metadata["default_connectivity_radius"], -1.0, 1.0)
+    norm_distance_to_boundary, arg_min = torch.min(norm_distance_to_boundary, dim=-1)
+    particles_far_from_wall = torch.where((particle_type == KINEMATIC_PARTICLE_ID) | (norm_distance_to_boundary >= 1))[0]
+    particles_close_to_wall = torch.where((particle_type != KINEMATIC_PARTICLE_ID) & (norm_distance_to_boundary < 1))[0]
+
+    # left wall, lower wall, right wall, upper wall
+    # 1 if touching, 0 at default_connectivity_radius or beyond
+    norm_inv_distance_to_boundary = (1/(norm_distance_to_boundary + 0.1) - 1/1.1)/(1/0.1-1/1.1)
+    direction_to_boundary = torch.zeros_like(recent_position)
+    direction_parallel_boundary = torch.zeros_like(recent_position)
+    find_ = torch.where(arg_min == 0)[0]
+    direction_to_boundary[find_, 0] = -1.0
+    direction_parallel_boundary[find_, 1] = -1.0
+    find_ = torch.where(arg_min == 1)[0]    
+    direction_to_boundary[find_, 1] = -1.0
+    direction_parallel_boundary[find_, 0] = 1.0
+    find_ = torch.where(arg_min == 2)[0]    
+    direction_to_boundary[find_, 0] = 1.0
+    direction_parallel_boundary[find_, 1] = 1.0
+    find_ = torch.where(arg_min == 3)[0]
+    direction_to_boundary[find_, 1] = 1.0
+    direction_parallel_boundary[find_, 0] = -1.0
+    normal_velocity_seq_to_wall = torch.einsum("ijk,ik->ij", normal_velocity_seq, direction_to_boundary)
+    normal_velocity_seq_parallel_to_wall = torch.einsum("ijk,ik->ij", normal_velocity_seq, direction_parallel_boundary)
+
+    # edge-level features: displacement, distance
+    dim = recent_position.size(-1)
+    edge_displacement1 = (torch.gather(recent_position, dim=0, index=swarm_edges[0].unsqueeze(-1).expand(-1, dim)) -
+                   torch.gather(recent_position, dim=0, index=swarm_edges[1].unsqueeze(-1).expand(-1, dim)))
+    edge_displacement1 /= metadata["default_connectivity_radius"]
+    inv_edge_displacement1 = torch.sign(edge_displacement1)*(1/(torch.abs(edge_displacement1) + 0.1) - 1/1.1)/(1/0.1-1/1.1)
+    depth = normal_velocity_seq.shape[1]
+    normal_relative_velocities1 = (torch.gather(normal_velocity_seq, dim=0, index=swarm_edges[0].view(-1, 1, 1).expand(-1, depth, 2)) -
+                torch.gather(normal_velocity_seq, dim=0, index=swarm_edges[1].view(-1, 1, 1).expand(-1, depth, 2)))
+
+    edge_displacement2 = (torch.gather(recent_position, dim=0, index=non_swarm_edges[0].unsqueeze(-1).expand(-1, dim)) -
+                   torch.gather(recent_position, dim=0, index=non_swarm_edges[1].unsqueeze(-1).expand(-1, dim)))
+    edge_displacement2 /= metadata["default_connectivity_radius"]
+    inv_edge_displacement2 = torch.sign(edge_displacement2)*(1/(torch.abs(edge_displacement2) + 0.1) - 1/1.1)/(1/0.1-1/1.1)
+    depth = normal_velocity_seq.shape[1]
+    normal_relative_velocities2 = (torch.gather(normal_velocity_seq, dim=0, index=non_swarm_edges[0].view(-1, 1, 1).expand(-1, depth, 2)) -
+                torch.gather(normal_velocity_seq, dim=0, index=non_swarm_edges[1].view(-1, 1, 1).expand(-1, depth, 2)))
+
+    # ground truth for training
+    if target_position is not None:
+        last_velocity = velocity_seq[:, -1]
+        next_velocity = target_position + position_noise[:, -1] - recent_position
+        acceleration = next_velocity - last_velocity
+        acceleration = acceleration / torch.sqrt(torch.sum(torch.tensor(metadata["acc_std"]) ** 2) + noise_std ** 2)
+    else:
+        acceleration = None
+
+    # return the graph with features
+
+    graph = pyg.data.Data(
+        x=particle_type,
+        edge_index=swarm_edges,
+        # anti-symmetric
+        edge_attr=torch.cat((edge_displacement1, inv_edge_displacement1, normal_relative_velocities1.flatten(start_dim=1)), dim=-1),
+        edge_index2=non_swarm_edges,
+        edge_attr2=torch.cat((edge_displacement2, inv_edge_displacement2, normal_relative_velocities2.flatten(start_dim=1)), dim=-1),
+        y=acceleration,
+        pos=normal_velocity_seq.flatten(start_dim=1), # captures any air drag
+        aux = {'has_opp_neighbour':has_opp_neighbour, 'particles_close_to_wall': particles_close_to_wall,
+               'wall_in_parameters': torch.cat((norm_inv_distance_to_boundary.unsqueeze(1), normal_velocity_seq_to_wall, normal_velocity_seq_parallel_to_wall), dim=-1),
+               'direction_to_boundary':direction_to_boundary, 'direction_parallel_boundary':direction_parallel_boundary, 
+               'down_direction':down_direction,'particles_far_from_wall':particles_far_from_wall,'recent_velocity':normal_velocity_seq[:,-1]}
+    )
+
+    return graph
 
 class MLP(torch.nn.Module):
     """Multi-Layer perceptron"""
@@ -132,12 +291,16 @@ class LearnedSimulator(torch.nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.window_size = window_size
+        self.dim = dim
         self.embed_type2 = torch.nn.Embedding(num_particle_types, particle_type_dim)
         self.node_in2 = MLP(particle_type_dim, hidden_size//2, hidden_size//2, 3)
+        self.node_in3 = MLP(dim*(window_size), hidden_size//2, hidden_size//2, 3)
         self.edge_in1 = MLP(dim*(window_size+2), hidden_size//2, hidden_size//2, 3)
         self.node_out1 = MLP(hidden_size//2, hidden_size//2, dim, 3, layernorm=False)
         self.edge_in2 = MLP(dim*(window_size+2), hidden_size//2, hidden_size//2, 3)
         self.node_out2 = MLP(hidden_size//2, hidden_size//2, dim, 3, layernorm=False)
+        self.edge_in3 = MLP(dim*(window_size+2), hidden_size//2, hidden_size//2, 3)
+        self.node_out3 = MLP(hidden_size//2, hidden_size//2, 1, 3, layernorm=False)
         self.wall_in = MLP(dim*window_size + 1, hidden_size, dim, 3)
         self.n_mp_layers = n_mp_layers
         self.layers1 = torch.nn.ModuleList([InteractionNetwork(
@@ -145,6 +308,9 @@ class LearnedSimulator(torch.nn.Module):
         ) for _ in range(n_mp_layers)])
         self.layers2 = torch.nn.ModuleList([InteractionNetwork(
             hidden_size//2, 3
+        ) for _ in range(n_mp_layers)])
+        self.layers3 = torch.nn.ModuleList([InteractionNetwork(
+            hidden_size//2, 3, antisymmetric=True
         ) for _ in range(n_mp_layers)])
 
         self.gravity = torch.nn.Parameter(torch.tensor(0.0))
@@ -157,15 +323,16 @@ class LearnedSimulator(torch.nn.Module):
     def forward(self, data: pyg.data.Data) -> torch.Tensor:
         # pre-processing
         # node feature: combine categorial feature data.x and contiguous feature data.pos.
+        node_feature1 = torch.zeros((data.x.shape[0], self.hidden_size//2), device=data.x.device) # no information inside, no damping
         node_feature2 = self.embed_type2(data.x)
-        node_feature1 = torch.zeros((data.x.shape[0],self.hidden_size//2)).to(data.x.device)
         node_feature2 = self.node_in2(node_feature2)
         edge_feature1 = 0.5*(self.edge_in1(data.edge_attr)-self.edge_in1(-data.edge_attr)) # anti-symmetric
         edge_feature2 = self.edge_in2(data.edge_attr2)
+        node_feature3 = 0.5*(self.node_in3(data.pos)-self.node_in3(-data.pos))
+        edge_feature3 = 0.5*(self.edge_in3(data.edge_attr)-self.edge_in3(-data.edge_attr)) # anti-symmetric
     
         find_ = torch.where(data.x != KINEMATIC_PARTICLE_ID)[0]
         blank_x = (torch.ones((1), device=data.x.device) * data.x[find_[0]]).to(torch.int64)
-        blank_node_feature1 = torch.zeros((data.x.shape[0],self.hidden_size//2)).to(data.x.device)
         blank_node_feature2 = self.embed_type2(blank_x)
         blank_node_feature2 = self.node_in2(blank_node_feature2)
 
@@ -173,19 +340,20 @@ class LearnedSimulator(torch.nn.Module):
         for i in range(self.n_mp_layers):
             node_feature1, edge_feature1 = self.layers1[i](node_feature1, data.edge_index, edge_feature=edge_feature1)
             node_feature2, edge_feature2 = self.layers2[i](node_feature2, data.edge_index2, edge_feature=edge_feature2)
-            blank_node_feature1, _ = self.layers1[i](blank_node_feature1, None, edge_feature=None, blank=True)
+            node_feature3, edge_feature3 = self.layers3[i](node_feature3, data.edge_index, edge_feature=edge_feature3)
             blank_node_feature2, _ = self.layers2[i](blank_node_feature2, None, edge_feature=None, blank=True)
         # post-processing
         # acceleration due to neighbours
         swarm_acceleration = 0.5*(self.node_out1(node_feature1)-self.node_out1(-node_feature1)) # anti-symmetric
-        blank_ = self.node_out1(blank_node_feature1)
-        swarm_acceleration -= blank_
+        damping_acceleration = 0.5*(self.node_out3(node_feature3)-self.node_out3(-node_feature3)) # anti-symmetric
+        recent_velocity = data.aux['recent_velocity']
+        damping_acceleration = -torch.abs(damping_acceleration) * recent_velocity
 
         obstacle_acceleration = self.node_out2(node_feature2)
         blank_ = self.node_out2(blank_node_feature2)
         obstacle_acceleration -= blank_
 
-        out = swarm_acceleration + obstacle_acceleration
+        out = swarm_acceleration + obstacle_acceleration + damping_acceleration
 
         wall_in_parameters = data.aux['wall_in_parameters']
         direction_to_boundary = data.aux['direction_to_boundary']
@@ -194,11 +362,12 @@ class LearnedSimulator(torch.nn.Module):
         particles_far_from_wall = data.aux['particles_far_from_wall']
 
         #acceleration due to gravity = constant * down direction
-        out += self.gravity*down_direction
+        out += 3.5*self.gravity*down_direction
 
         #acceleration due to walls = some magnitude (proximity to wall, relative velocitIES) * wall direction
         wall_out = self.wall_in(wall_in_parameters)
         wall_out[particles_far_from_wall,:] = 0.0
+
         out += wall_out[:,0].unsqueeze(1) * direction_to_boundary + wall_out[:,1].unsqueeze(1) * direction_parallel_boundary
 
         return out

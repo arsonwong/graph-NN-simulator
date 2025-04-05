@@ -1,11 +1,10 @@
-import os
+
 import torch
-import json
 import numpy as np
 import torch_geometric as pyg
 import pickle
 from tqdm import tqdm
-import yaml
+from graph_NN_simulator import KINEMATIC_PARTICLE_ID, preprocess, rotate, read_metadata
 
 '''
 This code is a PyTorch implementation of a graph neural network (GNN) simulator for particle dynamics, specifically designed to simulate the motion of particles in a 2D space. 
@@ -16,164 +15,6 @@ which is also described in this Medium article: Simulating Complex Physics with 
 https://medium.com/stanford-cs224w/simulating-complex-physics-with-graph-networks-step-by-step-177354cb9b05
 '''
 
-KINEMATIC_PARTICLE_ID = 3
-
-with open("config.yaml", "r") as f:
-    config = yaml.safe_load(f)
-    max_neighbours = config["model"]["max_neighbours"]
-
-def read_metadata(data_path):
-  with open(os.path.join(data_path, 'metadata.json'), 'rt') as fp:
-    return json.loads(fp.read())
-    
-def preprocess(particle_type, position_seq, target_position, metadata, noise_std, rotation=0):
-    def generate_noise(position_seq, noise_std):
-        """Generate noise for a trajectory"""
-        velocity_seq = position_seq[:, 1:] - position_seq[:, :-1]
-        time_steps = velocity_seq.size(1)
-        velocity_noise = torch.randn_like(velocity_seq) * (noise_std / time_steps ** 0.5)
-        velocity_noise = velocity_noise.cumsum(dim=1)
-        position_noise = velocity_noise.cumsum(dim=1)
-        position_noise = torch.cat((torch.zeros_like(position_noise)[:, 0:1], position_noise), dim=1)
-        return position_noise
-    
-    def rotate(tensor, rotation):
-        if rotation == 1: # CCW
-            tensor = tensor[..., [1, 0]]
-            tensor[...,0] = -tensor[..., 0]
-        elif rotation == 2: # 180
-            tensor = -tensor
-        elif rotation == 3: # CW
-            tensor = tensor[..., [1, 0]]
-            tensor[...,1] = -tensor[..., 1]
-        return tensor
-    
-    boundary = torch.tensor(metadata["bounds"])
-
-    if rotation != 0:
-        center = 0.5 * (boundary[:,0] + boundary[:,1])
-        position_seq = position_seq - center
-        position_seq = rotate(position_seq, rotation)
-        position_seq = position_seq + center
-        target_position = target_position - center
-        target_position = rotate(target_position, rotation) 
-        target_position = target_position + center
-        
-
-    """Preprocess a trajectory and construct the graph"""
-    # apply noise to the trajectory
-    position_noise = generate_noise(position_seq, noise_std)
-    # obstacle particles are not allowed to move
-    obstacle_particle_indices = torch.where(particle_type == KINEMATIC_PARTICLE_ID)[0]
-    position_noise[obstacle_particle_indices, :] = 0.0
-    position_seq = position_seq + position_noise
-
-    # calculate the velocities of particles
-    recent_position = position_seq[:, -1]
-    velocity_seq = position_seq[:, 1:] - position_seq[:, :-1]
-
-    down_direction = torch.zeros_like(recent_position)
-    down_direction[:,1] = -1.0
-    if rotation != 0:
-        down_direction = rotate(down_direction, rotation)
-
-    # construct the graph based on the distances between particles, but end up making advacency matrix symmetrical
-    n_particle = recent_position.size(0)
-    edge_index = pyg.nn.radius_graph(recent_position, metadata["default_connectivity_radius"], loop=False, max_num_neighbors=max_neighbours)
-    edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)
-    edge_index2 = pyg.nn.radius_graph(recent_position, metadata["default_connectivity_radius"], loop=False)
-    opposite_particles = torch.where(particle_type[edge_index2[0,:]] != particle_type[edge_index2[1,:]])[0]
-    edge_index2 = edge_index2[:,opposite_particles]
-    edge_index = torch.cat([edge_index, edge_index2], dim=1)
-    edge_index = torch.unique(edge_index, dim=1)
-
-    find_ = torch.where((particle_type[edge_index[0,:]] != KINEMATIC_PARTICLE_ID) & (particle_type[edge_index[1,:]] != KINEMATIC_PARTICLE_ID))[0]
-    swarm_edges = edge_index[:,find_]
-    find_ = torch.where((particle_type[edge_index[0,:]] == KINEMATIC_PARTICLE_ID) | (particle_type[edge_index[1,:]] == KINEMATIC_PARTICLE_ID))[0]
-    non_swarm_edges = edge_index[:,find_]
-
-    nodes_with_opp_neighbour = edge_index2.flatten()
-    nodes_with_opp_neighbour = torch.unique(nodes_with_opp_neighbour)
-    has_opp_neighbour = torch.zeros(n_particle, dtype=torch.bool)
-    has_opp_neighbour[nodes_with_opp_neighbour] = True   
-    has_opp_neighbour[obstacle_particle_indices] = False 
-    
-    # node-level features: velocity, distance to the boundary
-    normal_velocity_seq = velocity_seq / torch.sqrt(torch.sum(torch.tensor(metadata["vel_std"]) ** 2) + noise_std ** 2)
-    distance_to_lower_boundary = recent_position - boundary[:, 0]
-    distance_to_upper_boundary = boundary[:, 1] - recent_position
-    distance_to_boundary = torch.cat((distance_to_lower_boundary, distance_to_upper_boundary), dim=-1)
-    distance_to_boundary = torch.abs(distance_to_boundary)
-    norm_distance_to_boundary = torch.clip(distance_to_boundary / metadata["default_connectivity_radius"], -1.0, 1.0)
-    norm_distance_to_boundary, arg_min = torch.min(norm_distance_to_boundary, dim=-1)
-    particles_far_from_wall = torch.where((particle_type == KINEMATIC_PARTICLE_ID) | (norm_distance_to_boundary >= 1))[0]
-    particles_close_to_wall = torch.where((particle_type != KINEMATIC_PARTICLE_ID) & (norm_distance_to_boundary < 1))[0]
-
-    # left wall, lower wall, right wall, upper wall
-    # 1 if touching, 0 at default_connectivity_radius or beyond
-    norm_inv_distance_to_boundary = (1/(norm_distance_to_boundary + 0.1) - 1/1.1)/(1/0.1-1/1.1)
-    direction_to_boundary = torch.zeros_like(recent_position)
-    direction_parallel_boundary = torch.zeros_like(recent_position)
-    find_ = torch.where(arg_min == 0)[0]
-    direction_to_boundary[find_, 0] = -1.0
-    direction_parallel_boundary[find_, 1] = -1.0
-    find_ = torch.where(arg_min == 1)[0]    
-    direction_to_boundary[find_, 1] = -1.0
-    direction_parallel_boundary[find_, 0] = 1.0
-    find_ = torch.where(arg_min == 2)[0]    
-    direction_to_boundary[find_, 0] = 1.0
-    direction_parallel_boundary[find_, 1] = 1.0
-    find_ = torch.where(arg_min == 3)[0]
-    direction_to_boundary[find_, 1] = 1.0
-    direction_parallel_boundary[find_, 0] = -1.0
-    normal_velocity_seq_to_wall = torch.einsum("ijk,ik->ij", normal_velocity_seq, direction_to_boundary)
-    normal_velocity_seq_parallel_to_wall = torch.einsum("ijk,ik->ij", normal_velocity_seq, direction_parallel_boundary)
-
-    # edge-level features: displacement, distance
-    dim = recent_position.size(-1)
-    edge_displacement1 = (torch.gather(recent_position, dim=0, index=swarm_edges[0].unsqueeze(-1).expand(-1, dim)) -
-                   torch.gather(recent_position, dim=0, index=swarm_edges[1].unsqueeze(-1).expand(-1, dim)))
-    edge_displacement1 /= metadata["default_connectivity_radius"]
-    inv_edge_displacement1 = torch.sign(edge_displacement1)*(1/(torch.abs(edge_displacement1) + 0.1) - 1/1.1)/(1/0.1-1/1.1)
-    depth = normal_velocity_seq.shape[1]
-    normal_relative_velocities1 = (torch.gather(normal_velocity_seq, dim=0, index=swarm_edges[0].view(-1, 1, 1).expand(-1, depth, 2)) -
-                torch.gather(normal_velocity_seq, dim=0, index=swarm_edges[1].view(-1, 1, 1).expand(-1, depth, 2)))
-
-    edge_displacement2 = (torch.gather(recent_position, dim=0, index=non_swarm_edges[0].unsqueeze(-1).expand(-1, dim)) -
-                   torch.gather(recent_position, dim=0, index=non_swarm_edges[1].unsqueeze(-1).expand(-1, dim)))
-    edge_displacement2 /= metadata["default_connectivity_radius"]
-    inv_edge_displacement2 = torch.sign(edge_displacement2)*(1/(torch.abs(edge_displacement2) + 0.1) - 1/1.1)/(1/0.1-1/1.1)
-    depth = normal_velocity_seq.shape[1]
-    normal_relative_velocities2 = (torch.gather(normal_velocity_seq, dim=0, index=non_swarm_edges[0].view(-1, 1, 1).expand(-1, depth, 2)) -
-                torch.gather(normal_velocity_seq, dim=0, index=non_swarm_edges[1].view(-1, 1, 1).expand(-1, depth, 2)))
-
-    # ground truth for training
-    if target_position is not None:
-        last_velocity = velocity_seq[:, -1]
-        next_velocity = target_position + position_noise[:, -1] - recent_position
-        acceleration = next_velocity - last_velocity
-        acceleration = acceleration / torch.sqrt(torch.sum(torch.tensor(metadata["acc_std"]) ** 2) + noise_std ** 2)
-    else:
-        acceleration = None
-
-    # return the graph with features
-
-    graph = pyg.data.Data(
-        x=particle_type,
-        edge_index=swarm_edges,
-        # anti-symmetric
-        edge_attr=torch.cat((edge_displacement1, inv_edge_displacement1, normal_relative_velocities1.flatten(start_dim=1)), dim=-1),
-        edge_index2=non_swarm_edges,
-        edge_attr2=torch.cat((edge_displacement2, inv_edge_displacement2, normal_relative_velocities2.flatten(start_dim=1)), dim=-1),
-        y=acceleration,
-        pos=[], # no information inside initially; all information passed to edges
-        aux = {'has_opp_neighbour':has_opp_neighbour, 'particles_close_to_wall': particles_close_to_wall,
-               'wall_in_parameters': torch.cat((norm_inv_distance_to_boundary.unsqueeze(1), normal_velocity_seq_to_wall, normal_velocity_seq_parallel_to_wall), dim=-1),
-               'direction_to_boundary':direction_to_boundary, 'direction_parallel_boundary':direction_parallel_boundary, 
-               'down_direction':down_direction,'particles_far_from_wall':particles_far_from_wall}
-    )
-
-    return graph
 
 class OneStepDataset(pyg.data.Dataset):
     def __init__(self, data_path, split, window_length=7, noise_std=0.0, return_pos=False, random_rotation=False):
@@ -253,7 +94,7 @@ class RolloutDataset(pyg.data.Dataset):
         data = {"particle_type": particle_type, "position": position}
         return data
 
-def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=None):
+def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=None, rotation=0):
     device = next(model.parameters()).device
     model.eval()
     window_size = model.window_size + 1
@@ -266,7 +107,20 @@ def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=No
     boundary = torch.tensor(metadata["bounds"])
     obstacle_particle_indices = torch.where(particle_type == KINEMATIC_PARTICLE_ID)[0]
 
-    for time in tqdm(range(total_time - window_size),desc="rollout"):
+    rotation = 0
+    real_pos = data["position"]
+    if rotation != 0:
+        center = 0.5 * (boundary[:,0] + boundary[:,1])
+        traj = traj - center
+        traj = rotate(traj, rotation)
+        traj = traj + center
+        real_pos = real_pos - center
+        real_pos = rotate(real_pos, rotation)       
+        real_pos = real_pos + center
+
+    # for i in range(window_size-1):
+    #     traj[:,i] = traj[:, -1]
+    for time in tqdm(range(total_time - window_size)):
         with torch.no_grad():
             graph = preprocess(particle_type, traj[:, -window_size:], None, metadata, 0.0)
             graph = graph.to(device)
@@ -280,7 +134,7 @@ def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=No
             
             # obstacle particles just follow the ground truth positions
             if len(obstacle_particle_indices) > 0:
-                new_position[obstacle_particle_indices,:] = data["position"][obstacle_particle_indices, time+window_size+rollout_start,:]
+                new_position[obstacle_particle_indices,:] = real_pos[obstacle_particle_indices, time+window_size+rollout_start,:]
 
             new_position[:,0] = torch.maximum(new_position[:,0], boundary[0,0])
             new_position[:,1] = torch.maximum(new_position[:,1], boundary[1,0])
@@ -316,7 +170,7 @@ def oneStepMSE(simulator, dataloader, metadata, noise, sets_to_test=500):
                 break
     return total_loss / batch_count, total_mse / batch_count
 
-def rolloutMSE(simulator, dataset, metadata, noise, sets_to_test=[0], random_start=False, rollout_length=None):
+def rolloutMSE(simulator, dataset, metadata, noise, sets_to_test=[0], starting_points=None, rollout_length=None):
     """Returns two values, loss and MSE"""
     total_loss = 0.0
     total_mse = 0.0
@@ -324,13 +178,13 @@ def rolloutMSE(simulator, dataset, metadata, noise, sets_to_test=[0], random_sta
     simulator.eval()
     with torch.no_grad():
         scale = torch.sqrt(torch.sum(torch.tensor(metadata["acc_std"]) ** 2) + noise ** 2)
-        for rollout_data in tqdm(dataset[sets_to_test],desc="Roll out"):
+        for i, rollout_data in enumerate(tqdm(dataset[sets_to_test],desc="Roll out")):
             rollout_start = 0
-            if random_start:
+            if starting_points is not None:
                 length_ = 100
                 if rollout_length is not None:
                     length_ = rollout_length
-                rollout_start = np.random.randint(0, rollout_data["position"].size(1)-rollout_length-10)
+                rollout_start = starting_points[i]
             rollout_out = rollout(simulator, rollout_data, dataset.metadata, noise, rollout_start=rollout_start, rollout_length=rollout_length)
             length_ = rollout_out.size(1)
             mse = (rollout_out - rollout_data["position"][:,rollout_start:rollout_start+length_,:]) ** 2

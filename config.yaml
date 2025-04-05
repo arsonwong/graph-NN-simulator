@@ -13,8 +13,9 @@ training:
   rollout_interval: 5000
   session_name: ""
   visualize: TRUE
-  load_model_path: ""
-  obstacle_bias: 2
+  load_model_path: "2025-04-04_22_09_checkpoint_140000.pt"
+  obstacle_bias: 4
+  wall_bias: 4
 
 model:
   hidden_size: 128

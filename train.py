@@ -20,10 +20,17 @@ https://medium.com/stanford-cs224w/simulating-complex-physics-with-graph-network
 '''
 
 
-def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout_dataset, obstacle_bias=0.0, visualize=False, prefix="", v=0, total_steps_start=0):
+def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout_dataset, 
+          optimizer_state_dict = None, scheduler_state_dict = None,
+          obstacle_bias=0.0, wall_bias=0.0, visualize=False, prefix="", v=0, total_steps_start=0):
     loss_fn = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(simulator.parameters(), lr=params["lr"])
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.1 ** (1 / 5e6))
+
+    if optimizer_state_dict is not None:
+        optimizer.load_state_dict(optimizer_state_dict)
+    if scheduler_state_dict is not None:
+        scheduler.load_state_dict(scheduler_state_dict)
 
     # recording loss curve
     train_loss_list = []
@@ -35,6 +42,8 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
     file_path = os.path.join(training_stats_path, f"{prefix}_train_loss.txt")
     if os.path.exists(file_path):
         data = np.loadtxt(file_path, delimiter=",")  # Load two-column CSV data
+        if data.ndim == 1:
+            data = np.expand_dims(data, axis=0)  # or data = data[None, :]
         for row in data:
             if row[0] >= total_steps_start:
                 break
@@ -47,6 +56,8 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
     file_path = os.path.join(training_stats_path, f"{prefix}_eval_loss.txt")
     if os.path.exists(file_path):
         data = np.loadtxt(file_path, delimiter=",")  # Load two-column CSV data
+        if data.ndim == 1:
+            data = np.expand_dims(data, axis=0)  # or data = data[None, :]
         for row in data:
             if row[0] >= total_steps_start:
                 break
@@ -58,6 +69,8 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
     file_path = os.path.join(training_stats_path, f"{prefix}_rollout_loss.txt")
     if os.path.exists(file_path):
         data = np.loadtxt(file_path, delimiter=",")  # Load two-column CSV data
+        if data.ndim == 1:
+            data = np.expand_dims(data, axis=0)  # or data = data[None, :]
         for row in data:
             if row[0] >= total_steps_start:
                 break
@@ -97,14 +110,18 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
             pred[obstacle_particle_indices,:] = data.y[obstacle_particle_indices,:]
             loss_overall += loss_fn(pred, data.y).item()*data.y.shape[0]
             loss_overall_counter += data.y.shape[0]
+            is_close_to_wall = torch.zeros((data.y.shape[0],1),dtype=torch.bool).to(device)
             find_ = data.aux['particles_close_to_wall']
+            is_close_to_wall[find_] = True
             if len(find_) > 0:
                 loss_close_to_wall += loss_fn(pred[find_,:], data.y[find_,:]).item()*len(find_)
                 loss_close_to_wall_counter += len(find_)
-            find_ = torch.where(has_opp_neighbour)[0]
+            find_ = torch.where((has_opp_neighbour==True) & (is_close_to_wall==False))[0]
             if len(find_) > 0:
                 loss_with_obstacle += loss_fn(pred[find_,:], data.y[find_,:]).item()*len(find_)
                 loss_with_obstacle_counter += len(find_)
+            pred[data.aux['particles_close_to_wall'],:] *= 1.0+wall_bias
+            data.y[data.aux['particles_close_to_wall'],:] *= 1.0+wall_bias
             pred[find_,:] *= 1.0+obstacle_bias
             data.y[find_,:] *= 1.0+obstacle_bias
             loss = loss_fn(pred, data.y)
@@ -188,8 +205,9 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
             # do rollout on valid set
             if total_step % params["rollout_interval"] == 0:
                 simulator.eval()
+                starting_points = [100,0,200,500,400,50,300,150,250,532,352,361,265,312,123,4,153,132,152,423,292]
                 rollout_loss, rollout_mse = rolloutMSE(simulator, valid_rollout_dataset, metadata, params["noise"],
-                                                       sets_to_test=list(range(1, 21)), random_start=True, rollout_length=20)
+                                                       sets_to_test=list(range(1, 21)), starting_points=starting_points, rollout_length=20)
                 rollout_loss_list.append((total_step, rollout_loss))
                 tqdm.write(f"\nEval: Rollout Loss: {rollout_loss}, Rollout MSE: {rollout_mse}")
                 with open(os.path.join(training_stats_path,f"{prefix}_rollout_loss.txt"), "a") as file:
@@ -226,6 +244,7 @@ if __name__ == '__main__':
     visualize = config["training"]['visualize']
     load_model_path = config["training"]['load_model_path']
     obstacle_bias = config["training"]['obstacle_bias']
+    wall_bias = config["training"]['wall_bias']
 
     if len(session_name)>0:
         session_name += "_"
@@ -233,7 +252,7 @@ if __name__ == '__main__':
     session_name += datetime.now().strftime("%Y-%m-%d_%H_%M")
 
     # load dataset
-    train_dataset = OneStepDataset(data_path, "train", noise_std=params["noise"], random_rotation=False)
+    train_dataset = OneStepDataset(data_path, "train", noise_std=params["noise"], random_rotation=True)
     valid_dataset = OneStepDataset(data_path, "valid", noise_std=params["noise"])
     train_loader = pyg.loader.DataLoader(train_dataset, batch_size=params["batch_size"], shuffle=True, pin_memory=True, num_workers=1)
     valid_loader = pyg.loader.DataLoader(valid_dataset, batch_size=params["batch_size"], shuffle=True, pin_memory=True, num_workers=1)
@@ -246,6 +265,9 @@ if __name__ == '__main__':
     simulator = simulator.to(device)
 
     total_steps_start = 0
+    checkpoint = {      "model": None,
+                        "optimizer": None,
+                        "scheduler": None }
     if len(load_model_path)>0:
         checkpoint = torch.load(os.path.join(model_path, load_model_path))
         simulator.load_state_dict(checkpoint["model"])
@@ -259,4 +281,6 @@ if __name__ == '__main__':
     # train the model
     metadata = read_metadata(data_path)
     train_loss_list, eval_loss_list, onestep_mse_list, rollout_mse_list = train(params, simulator, train_loader, valid_loader, metadata, valid_rollout_dataset, 
-                                                                                obstacle_bias=obstacle_bias, prefix=session_name, visualize=visualize, total_steps_start=total_steps_start)
+                                                                                optimizer_state_dict=checkpoint["optimizer"],
+                                                                                scheduler_state_dict=checkpoint["scheduler"],
+                                                                                wall_bias=wall_bias, obstacle_bias=obstacle_bias, prefix=session_name, visualize=visualize, total_steps_start=total_steps_start)
