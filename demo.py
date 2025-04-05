@@ -4,8 +4,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import animation
 from data_processing import *
-from graph_NN_simulator import *
 import yaml
+import importlib
+
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
+    model_version = config["model"]["model_version"]
+graph_model = importlib.import_module(f"{model_version}.graph_NN_simulator")
 
 '''
 This code is a PyTorch implementation of a graph neural network (GNN) simulator for particle dynamics, specifically designed to simulate the motion of particles in a 2D space. 
@@ -80,12 +85,12 @@ if __name__ == '__main__':
     model_path = config['data']['model_path']
 
     # build model
-    simulator = LearnedSimulator(hidden_size=model_params["hidden_size"], 
+    simulator = graph_model.LearnedSimulator(hidden_size=model_params["hidden_size"], 
                                     n_mp_layers=model_params["n_mp_layers"], 
                                     window_size=model_params["window_size"])
     simulator = simulator.to(device)
 
-    checkpoint = torch.load(os.path.join(model_path, "2025-04-04_22_09_checkpoint_140000.pt"))
+    checkpoint = torch.load(os.path.join(model_path, "2025-04-01_21_35_checkpoint_100000.pt"))
     simulator.load_state_dict(checkpoint["model"])
     rollout_dataset = RolloutDataset(data_path, "valid")
     simulator.eval()

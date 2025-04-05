@@ -5,10 +5,15 @@ import matplotlib.pyplot as plt
 import networkx as nx
 from tqdm import tqdm
 from data_processing import *
-from graph_NN_simulator import *
 import yaml
 from datetime import datetime
 import re
+import importlib
+
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
+    model_version = config["model"]["model_version"]
+graph_model = importlib.import_module(f"{model_version}.graph_NN_simulator")
 
 '''
 This code is a PyTorch implementation of a graph neural network (GNN) simulator for particle dynamics, specifically designed to simulate the motion of particles in a 2D space. 
@@ -259,7 +264,7 @@ if __name__ == '__main__':
     valid_rollout_dataset = RolloutDataset(data_path, "valid")
 
     # build model
-    simulator = LearnedSimulator(hidden_size=model_params["hidden_size"], 
+    simulator = graph_model.LearnedSimulator(hidden_size=model_params["hidden_size"], 
                                     n_mp_layers=model_params["n_mp_layers"], 
                                     window_size=model_params["window_size"])
     simulator = simulator.to(device)

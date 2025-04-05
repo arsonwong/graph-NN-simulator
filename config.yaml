@@ -18,6 +18,7 @@ training:
   wall_bias: 4
 
 model:
+  model_version: "original_model" # "original_model" or "additive_model"
   hidden_size: 128
   n_mp_layers: 10
   window_size: 5

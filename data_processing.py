@@ -4,7 +4,18 @@ import numpy as np
 import torch_geometric as pyg
 import pickle
 from tqdm import tqdm
-from graph_NN_simulator import KINEMATIC_PARTICLE_ID, preprocess, rotate, read_metadata
+import importlib
+import yaml
+
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
+    model_version = config["model"]["model_version"]
+graph_model = importlib.import_module(f"{model_version}.graph_NN_simulator")
+
+KINEMATIC_PARTICLE_ID = graph_model.KINEMATIC_PARTICLE_ID
+preprocess = graph_model.preprocess
+rotate = graph_model.rotate
+read_metadata = graph_model.read_metadata
 
 '''
 This code is a PyTorch implementation of a graph neural network (GNN) simulator for particle dynamics, specifically designed to simulate the motion of particles in a 2D space. 
@@ -136,10 +147,10 @@ def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=No
             if len(obstacle_particle_indices) > 0:
                 new_position[obstacle_particle_indices,:] = real_pos[obstacle_particle_indices, time+window_size+rollout_start,:]
 
-            new_position[:,0] = torch.maximum(new_position[:,0], boundary[0,0])
-            new_position[:,1] = torch.maximum(new_position[:,1], boundary[1,0])
-            new_position[:,0] = torch.minimum(new_position[:,0], boundary[0,1])
-            new_position[:,1] = torch.minimum(new_position[:,1], boundary[1,1])
+            # new_position[:,0] = torch.maximum(new_position[:,0], boundary[0,0])
+            # new_position[:,1] = torch.maximum(new_position[:,1], boundary[1,0])
+            # new_position[:,0] = torch.minimum(new_position[:,0], boundary[0,1])
+            # new_position[:,1] = torch.minimum(new_position[:,1], boundary[1,1])
             traj = torch.cat((traj, new_position.unsqueeze(1)), dim=1)
 
     return traj
