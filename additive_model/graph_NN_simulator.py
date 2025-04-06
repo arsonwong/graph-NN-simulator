@@ -121,6 +121,8 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     swarm_edges = edge_index[:,find_]
     find_ = torch.where((particle_type[edge_index[0,:]] == KINEMATIC_PARTICLE_ID) | (particle_type[edge_index[1,:]] == KINEMATIC_PARTICLE_ID))[0]
     non_swarm_edges = edge_index[:,find_]
+    find_ = torch.where((particle_type[edge_index[0,:]] != KINEMATIC_PARTICLE_ID) & (particle_type[edge_index[1,:]] == KINEMATIC_PARTICLE_ID))[0]
+    non_swarm_edges_with_moving_particle = edge_index[:,find_]
 
     nodes_with_opp_neighbour = edge_index2.flatten()
     nodes_with_opp_neighbour = torch.unique(nodes_with_opp_neighbour)
@@ -133,31 +135,14 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     distance_to_lower_boundary = recent_position - boundary[:, 0]
     distance_to_upper_boundary = boundary[:, 1] - recent_position
     distance_to_boundary = torch.cat((distance_to_lower_boundary, distance_to_upper_boundary), dim=-1)
-    distance_to_boundary = torch.abs(distance_to_boundary)
     norm_distance_to_boundary = torch.clip(distance_to_boundary / metadata["default_connectivity_radius"], -1.0, 1.0)
-    norm_distance_to_boundary, arg_min = torch.min(norm_distance_to_boundary, dim=-1)
-    particles_far_from_wall = torch.where((particle_type == KINEMATIC_PARTICLE_ID) | (norm_distance_to_boundary >= 1))[0]
-    particles_close_to_wall = torch.where((particle_type != KINEMATIC_PARTICLE_ID) & (norm_distance_to_boundary < 1))[0]
+    min_, _ = torch.min(torch.abs(norm_distance_to_boundary), dim=-1)
+    particles_far_from_wall = torch.where((particle_type == KINEMATIC_PARTICLE_ID) | (min_ >= 1))[0]
+    particles_close_to_wall = torch.where((particle_type != KINEMATIC_PARTICLE_ID) & (min_ < 1))[0]
 
     # left wall, lower wall, right wall, upper wall
     # 1 if touching, 0 at default_connectivity_radius or beyond
-    norm_inv_distance_to_boundary = (1/(norm_distance_to_boundary + 0.1) - 1/1.1)/(1/0.1-1/1.1)
-    direction_to_boundary = torch.zeros_like(recent_position)
-    direction_parallel_boundary = torch.zeros_like(recent_position)
-    find_ = torch.where(arg_min == 0)[0]
-    direction_to_boundary[find_, 0] = -1.0
-    direction_parallel_boundary[find_, 1] = -1.0
-    find_ = torch.where(arg_min == 1)[0]    
-    direction_to_boundary[find_, 1] = -1.0
-    direction_parallel_boundary[find_, 0] = 1.0
-    find_ = torch.where(arg_min == 2)[0]    
-    direction_to_boundary[find_, 0] = 1.0
-    direction_parallel_boundary[find_, 1] = 1.0
-    find_ = torch.where(arg_min == 3)[0]
-    direction_to_boundary[find_, 1] = 1.0
-    direction_parallel_boundary[find_, 0] = -1.0
-    normal_velocity_seq_to_wall = torch.einsum("ijk,ik->ij", normal_velocity_seq, direction_to_boundary)
-    normal_velocity_seq_parallel_to_wall = torch.einsum("ijk,ik->ij", normal_velocity_seq, direction_parallel_boundary)
+    norm_inv_distance_to_boundary = (1/(torch.abs(norm_distance_to_boundary) + 0.1) - 1/1.1)/(1/0.1-1/1.1)
 
     # edge-level features: displacement, distance
     dim = recent_position.size(-1)
@@ -176,7 +161,23 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     depth = normal_velocity_seq.shape[1]
     normal_relative_velocities2 = (torch.gather(normal_velocity_seq, dim=0, index=non_swarm_edges[0].view(-1, 1, 1).expand(-1, depth, 2)) -
                 torch.gather(normal_velocity_seq, dim=0, index=non_swarm_edges[1].view(-1, 1, 1).expand(-1, depth, 2)))
+    
+    edge_displacement3 = (torch.gather(recent_position, dim=0, index=non_swarm_edges_with_moving_particle[1].unsqueeze(-1).expand(-1, dim)) -
+                   torch.gather(recent_position, dim=0, index=non_swarm_edges_with_moving_particle[0].unsqueeze(-1).expand(-1, dim)))
+    edge_displacement3 /= metadata["default_connectivity_radius"]
+    edge_distance3 = edge_displacement3.norm(dim=1, keepdim=True)
+    edge_direction3 = torch.zeros_like(edge_displacement3)
+    find_ = torch.where(edge_distance3 > 0)[0]
+    edge_direction3[find_,:] = edge_displacement3/edge_distance3
+    inv_edge_distance3 = (1/(torch.abs(edge_distance3) + 0.1) - 1/1.1)/(1/0.1-1/1.1)
+    recent_velocity = normal_velocity_seq[:,-1]
+    unit_x = torch.tensor([1,0]).unsqueeze(0)
+    unit_y = torch.tensor([0,1]).unsqueeze(0)
 
+    find_ = non_swarm_edges_with_moving_particle[0,:]
+    approach_speed = recent_velocity[find_,0].unsqueeze(1)*edge_direction3[:,0].unsqueeze(1) + recent_velocity[find_,1].unsqueeze(1)*edge_direction3[:,1].unsqueeze(1)
+    approach_speed = torch.clip(approach_speed,0,1000)
+    
     # ground truth for training
     if target_position is not None:
         last_velocity = velocity_seq[:, -1]
@@ -195,12 +196,16 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         edge_attr=torch.cat((edge_displacement1, inv_edge_displacement1, normal_relative_velocities1.flatten(start_dim=1)), dim=-1),
         edge_index2=non_swarm_edges,
         edge_attr2=torch.cat((edge_displacement2, inv_edge_displacement2, normal_relative_velocities2.flatten(start_dim=1)), dim=-1),
+        edge_index3 = non_swarm_edges_with_moving_particle,
         y=acceleration,
         pos=normal_velocity_seq.flatten(start_dim=1), # captures any air drag
-        aux = {'has_opp_neighbour':has_opp_neighbour, 'particles_close_to_wall': particles_close_to_wall,
-               'wall_in_parameters': torch.cat((norm_inv_distance_to_boundary.unsqueeze(1), normal_velocity_seq_to_wall, normal_velocity_seq_parallel_to_wall), dim=-1),
-               'direction_to_boundary':direction_to_boundary, 'direction_parallel_boundary':direction_parallel_boundary, 
-               'down_direction':down_direction,'particles_far_from_wall':particles_far_from_wall,'recent_velocity':normal_velocity_seq[:,-1]}
+        aux = {'has_opp_neighbour':has_opp_neighbour, 'particles_close_to_wall': particles_close_to_wall, 
+               'down_direction':down_direction,'particles_far_from_wall':particles_far_from_wall,'recent_velocity':recent_velocity,
+               'acceleration_scale': torch.sqrt(torch.sum(torch.tensor(metadata["acc_std"]) ** 2) + noise_std ** 2),
+               'velocity_scale': torch.sqrt(torch.sum(torch.tensor(metadata["vel_std"]) ** 2) + noise_std ** 2), 
+               'norm_inv_distance_to_boundary':norm_inv_distance_to_boundary, 'norm_distance_to_boundary':norm_distance_to_boundary, 'recent_position':recent_position, 
+               'normal_velocity_seq': normal_velocity_seq, 'unit_x': unit_x, 'unit_y': unit_y,
+               'approach_speed': approach_speed, 'inv_edge_distance3': inv_edge_distance3, 'edge_direction3': edge_direction3}
     )
 
     return graph
@@ -299,18 +304,13 @@ class LearnedSimulator(torch.nn.Module):
         self.node_out1 = MLP(hidden_size//2, hidden_size//2, dim, 3, layernorm=False)
         self.edge_in2 = MLP(dim*(window_size+2), hidden_size//2, hidden_size//2, 3)
         self.node_out2 = MLP(hidden_size//2, hidden_size//2, dim, 3, layernorm=False)
-        self.edge_in3 = MLP(dim*(window_size+2), hidden_size//2, hidden_size//2, 3)
-        self.node_out3 = MLP(hidden_size//2, hidden_size//2, 1, 3, layernorm=False)
-        self.wall_in = MLP(dim*window_size + 1, hidden_size, dim, 3)
+        self.wall_in = MLP(dim*window_size + 2, hidden_size, dim, 3)
         self.n_mp_layers = n_mp_layers
         self.layers1 = torch.nn.ModuleList([InteractionNetwork(
             hidden_size//2, 3, antisymmetric=True
         ) for _ in range(n_mp_layers)])
         self.layers2 = torch.nn.ModuleList([InteractionNetwork(
             hidden_size//2, 3
-        ) for _ in range(n_mp_layers)])
-        self.layers3 = torch.nn.ModuleList([InteractionNetwork(
-            hidden_size//2, 3, antisymmetric=True
         ) for _ in range(n_mp_layers)])
 
         self.gravity = torch.nn.Parameter(torch.tensor(0.0))
@@ -328,8 +328,6 @@ class LearnedSimulator(torch.nn.Module):
         node_feature2 = self.node_in2(node_feature2)
         edge_feature1 = 0.5*(self.edge_in1(data.edge_attr)-self.edge_in1(-data.edge_attr)) # anti-symmetric
         edge_feature2 = self.edge_in2(data.edge_attr2)
-        node_feature3 = 0.5*(self.node_in3(data.pos)-self.node_in3(-data.pos))
-        edge_feature3 = 0.5*(self.edge_in3(data.edge_attr)-self.edge_in3(-data.edge_attr)) # anti-symmetric
     
         find_ = torch.where(data.x != KINEMATIC_PARTICLE_ID)[0]
         blank_x = (torch.ones((1), device=data.x.device) * data.x[find_[0]]).to(torch.int64)
@@ -340,34 +338,115 @@ class LearnedSimulator(torch.nn.Module):
         for i in range(self.n_mp_layers):
             node_feature1, edge_feature1 = self.layers1[i](node_feature1, data.edge_index, edge_feature=edge_feature1)
             node_feature2, edge_feature2 = self.layers2[i](node_feature2, data.edge_index2, edge_feature=edge_feature2)
-            node_feature3, edge_feature3 = self.layers3[i](node_feature3, data.edge_index, edge_feature=edge_feature3)
             blank_node_feature2, _ = self.layers2[i](blank_node_feature2, None, edge_feature=None, blank=True)
         # post-processing
         # acceleration due to neighbours
         swarm_acceleration = 0.5*(self.node_out1(node_feature1)-self.node_out1(-node_feature1)) # anti-symmetric
-        damping_acceleration = 0.5*(self.node_out3(node_feature3)-self.node_out3(-node_feature3)) # anti-symmetric
         recent_velocity = data.aux['recent_velocity']
-        damping_acceleration = -torch.abs(damping_acceleration) * recent_velocity
 
         obstacle_acceleration = self.node_out2(node_feature2)
         blank_ = self.node_out2(blank_node_feature2)
         obstacle_acceleration -= blank_
 
-        out = swarm_acceleration + obstacle_acceleration + damping_acceleration
+        out = (swarm_acceleration + obstacle_acceleration)
 
-        wall_in_parameters = data.aux['wall_in_parameters']
-        direction_to_boundary = data.aux['direction_to_boundary']
-        direction_parallel_boundary = data.aux['direction_parallel_boundary']
         down_direction = data.aux['down_direction']
-        particles_far_from_wall = data.aux['particles_far_from_wall']
+        acceleration_scale = data.aux['acceleration_scale']
+        velocity_scale = data.aux['velocity_scale']
+        unit_x = data.aux['unit_x']
+        unit_y = data.aux['unit_y']
+        if acceleration_scale.shape != torch.Size([]):
+            acceleration_scale = acceleration_scale[0]
+            velocity_scale = velocity_scale[0]
+            unit_x = unit_x[0]
+            unit_y = unit_y[0]
 
-        #acceleration due to gravity = constant * down direction
-        out += 3.5*self.gravity*down_direction
+        #acceleration due to gravity = constant * down direction, with bias term that's the true value
+        out += (5.5339e-05/acceleration_scale)*down_direction
 
-        #acceleration due to walls = some magnitude (proximity to wall, relative velocitIES) * wall direction
-        wall_out = self.wall_in(wall_in_parameters)
-        wall_out[particles_far_from_wall,:] = 0.0
+        #bias at boundary particle - just try to stop the particle
+        boundary_bias = torch.zeros((data.x.shape[0],2), device=data.x.device)
+        approach_speed = data.aux['approach_speed']
+        inv_edge_distance3 = data.aux['inv_edge_distance3']
+        edge_direction3 = data.aux['edge_direction3']
+        vals = inv_edge_distance3 * approach_speed * edge_direction3 * velocity_scale / acceleration_scale * 60/94 * 10 
+        idx = data.edge_index3[0,:]
+        boundary_bias.index_add_(0, idx, vals)
+        boundary_bias = torch.sign(boundary_bias) * torch.min(torch.abs(boundary_bias), torch.abs(recent_velocity * velocity_scale / acceleration_scale * 60/94))
+        vals *= 0
+        dot_ = (edge_direction3[:,0].unsqueeze(1) * down_direction[0,0].item()  + edge_direction3[:,1].unsqueeze(1) * down_direction[0,1].item())
+        find_ = torch.where(dot_ < 0)[0]
+        if len(find_) > 0:
+            vals[find_] -= 5.5339e-05/acceleration_scale * dot_[find_] * down_direction[0,:]
+        find_ = torch.where(dot_ >= 0)[0]
+        if len(find_) > 0:
+            vals[find_] += 5.5339e-05/acceleration_scale * inv_edge_distance3[find_] * dot_[find_] * down_direction[0,:]
+        boundary_bias.index_add_(0, idx, vals)
+        out -= boundary_bias
 
-        out += wall_out[:,0].unsqueeze(1) * direction_to_boundary + wall_out[:,1].unsqueeze(1) * direction_parallel_boundary
+        # left wall, lower wall, right wall, upper wall
+        norm_inv_distance_to_boundary = data.aux['norm_inv_distance_to_boundary']
+        norm_distance_to_boundary = data.aux['norm_distance_to_boundary']
+        normal_velocity_seq = data.aux['normal_velocity_seq']
+
+        # bias at wall - just stops the particle from going through the wall
+        wall_bias = torch.zeros((data.x.shape[0],2), device=data.x.device)
+
+        find_ = torch.where(norm_inv_distance_to_boundary[:,0].unsqueeze(1) > 1e-7)[0]
+        if len(find_) > 0:
+            find2_ = torch.where(norm_distance_to_boundary[find_,0] < 0)[0]
+            if len(find2_) > 0:
+                wall_bias[find_[find2_],:] += torch.clip(-recent_velocity[find_[find2_],0],0,1000).unsqueeze(1) * -unit_x * velocity_scale / acceleration_scale * 60/94
+            find2_ = torch.where(norm_distance_to_boundary[find_,0] >= 0)[0]
+            if len(find2_) > 0:
+                wall_bias[find_[find2_],:] += norm_inv_distance_to_boundary[find_[find2_],0].unsqueeze(1) * torch.clip(-recent_velocity[find_[find2_],0],0,1000).unsqueeze(1) * -unit_x * velocity_scale / acceleration_scale * 60/94           
+            input = torch.cat((-normal_velocity_seq[find_,:,0],-normal_velocity_seq[find_,:,1],norm_inv_distance_to_boundary[find_,0].unsqueeze(1),norm_distance_to_boundary[find_,0].unsqueeze(1)), dim=-1)
+            wall_out = self.wall_in(input)
+            wall_bias[find_] += wall_out[:,0].unsqueeze(1) * -unit_x + wall_out[:,1].unsqueeze(1) * -unit_y
+
+        find_ = torch.where(norm_inv_distance_to_boundary[:,1].unsqueeze(1) > 1e-7)[0]
+        if len(find_) > 0:
+            find2_ = torch.where(norm_distance_to_boundary[find_,1] < 0)[0]          
+            if len(find2_) > 0:
+                wall_bias[find_[find2_],:] += torch.clip(-recent_velocity[find_[find2_],1],0,1000).unsqueeze(1) * -unit_y * velocity_scale / acceleration_scale * 60/94
+                wall_bias[find_[find2_]] -= 5.5339e-05/acceleration_scale * unit_y
+            find2_ = torch.where(norm_distance_to_boundary[find_,1] >= 0)[0]
+            if len(find2_) > 0:
+                wall_bias[find_[find2_],:] += norm_inv_distance_to_boundary[find_[find2_],1].unsqueeze(1) * torch.clip(-recent_velocity[find_[find2_],1],0,1000).unsqueeze(1) * -unit_y * velocity_scale / acceleration_scale * 60/94             
+                wall_bias[find_[find2_]] -= norm_inv_distance_to_boundary[find_[find2_],1].unsqueeze(1) * 5.5339e-05/acceleration_scale * unit_y
+            if len(find_) > 0:
+                input = torch.cat((-normal_velocity_seq[find_,:,1],normal_velocity_seq[find_,:,0],norm_inv_distance_to_boundary[find_,1].unsqueeze(1),norm_distance_to_boundary[find_,1].unsqueeze(1)), dim=-1)
+                wall_out = self.wall_in(input)
+                wall_bias[find_] += wall_out[:,0].unsqueeze(1) * -unit_y + wall_out[:,1].unsqueeze(1) * unit_x
+
+        find_ = torch.where(norm_inv_distance_to_boundary[:,2].unsqueeze(1) > 1e-7)[0]
+        if len(find_) > 0:
+            find2_ = torch.where(norm_distance_to_boundary[find_,2] < 0)[0]
+            if len(find2_) > 0:
+                wall_bias[find_[find2_],:] += torch.clip(recent_velocity[find_[find2_],0],0,1000).unsqueeze(1) * unit_x * velocity_scale / acceleration_scale * 60/94
+            find2_ = torch.where(norm_distance_to_boundary[find_,2] >= 0)[0]
+            if len(find2_) > 0:
+                wall_bias[find_[find2_],:] += norm_inv_distance_to_boundary[find_[find2_],2].unsqueeze(1) * torch.clip(recent_velocity[find_[find2_],0],0,1000).unsqueeze(1) * unit_x * velocity_scale / acceleration_scale * 60/94
+
+            if len(find_) > 0:
+                input = torch.cat((normal_velocity_seq[find_,:,0],normal_velocity_seq[find_,:,1],norm_inv_distance_to_boundary[find_,2].unsqueeze(1),norm_distance_to_boundary[find_,2].unsqueeze(1)), dim=-1)
+                wall_out = self.wall_in(input)
+                wall_bias[find_] += wall_out[:,0].unsqueeze(1) * unit_x + wall_out[:,1].unsqueeze(1) * unit_y
+
+        find_ = torch.where(norm_inv_distance_to_boundary[:,3].unsqueeze(1) > 1e-7)[0]
+        if len(find_) > 0:
+            find2_ = torch.where(norm_distance_to_boundary[find_,3] < 0)[0]
+            if len(find2_) > 0:
+                wall_bias[find_[find2_],:] += torch.clip(recent_velocity[find_[find2_],1],0,1000).unsqueeze(1) * unit_y * velocity_scale / acceleration_scale * 60/94
+            find2_ = torch.where(norm_distance_to_boundary[find_,3] >= 0)[0]
+            if len(find2_) > 0:
+                wall_bias[find_[find2_],:] += norm_inv_distance_to_boundary[find_[find2_],3].unsqueeze(1) * torch.clip(recent_velocity[find_[find2_],1],0,1000).unsqueeze(1) * unit_y * velocity_scale / acceleration_scale * 60/94
+
+            if len(find_) > 0:
+                input = torch.cat((normal_velocity_seq[find_,:,1],-normal_velocity_seq[find_,:,0],norm_inv_distance_to_boundary[find_,3].unsqueeze(1),norm_distance_to_boundary[find_,3].unsqueeze(1)), dim=-1)
+                wall_out = self.wall_in(input)
+                wall_bias[find_] += wall_out[:,0].unsqueeze(1) * unit_y + wall_out[:,1].unsqueeze(1) * -unit_x
+
+        out -= wall_bias
 
         return out

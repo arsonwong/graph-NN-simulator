@@ -6,6 +6,7 @@ from matplotlib import animation
 from data_processing import *
 import yaml
 import importlib
+import matplotlib.patches as patches
 
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
@@ -31,11 +32,14 @@ TYPE_TO_COLOR = {
 
 def visualize_prepare(ax, particle_type, position, metadata):
     bounds = metadata["bounds"]
-    ax.set_xlim(bounds[0][0], bounds[0][1])
-    ax.set_ylim(bounds[1][0], bounds[1][1])
+    ax.set_xlim(bounds[0][0]-0.1, bounds[0][1]+0.1)
+    ax.set_ylim(bounds[1][0]-0.1, bounds[1][1]+0.1)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_aspect(1.0)
+    rect = patches.Rectangle((bounds[0][0], bounds[1][0]), bounds[0][1]-bounds[0][0], bounds[1][1]-bounds[1][0], 
+                             linewidth=1, edgecolor='black', facecolor='none')
+    ax.add_patch(rect)
     points = {type_: ax.plot([], [], "o", ms=2, color=color)[0] for type_, color in TYPE_TO_COLOR.items()}
     return ax, position, points
 
@@ -90,13 +94,13 @@ if __name__ == '__main__':
                                     window_size=model_params["window_size"])
     simulator = simulator.to(device)
 
-    checkpoint = torch.load(os.path.join(model_path, "2025-04-01_21_35_checkpoint_100000.pt"))
+    checkpoint = torch.load(os.path.join(model_path, "2025-04-06_11_40_checkpoint_100.pt"))
     simulator.load_state_dict(checkpoint["model"])
     rollout_dataset = RolloutDataset(data_path, "valid")
     simulator.eval()
 
     rollout_data = rollout_dataset[1]
-    rollout_start = 0
+    rollout_start = 30
     rollout_out = rollout(simulator, rollout_data, rollout_dataset.metadata, params["noise"], rollout_start=rollout_start, rollout_length=300)
     length_ = rollout_out.size(1)
     cropped_rollout_data_pos = rollout_data["position"][:,rollout_start:rollout_start+length_,:]

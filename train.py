@@ -32,10 +32,10 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
     optimizer = torch.optim.Adam(simulator.parameters(), lr=params["lr"])
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.1 ** (1 / 5e6))
 
-    if optimizer_state_dict is not None:
-        optimizer.load_state_dict(optimizer_state_dict)
-    if scheduler_state_dict is not None:
-        scheduler.load_state_dict(scheduler_state_dict)
+    # if optimizer_state_dict is not None:
+    #     optimizer.load_state_dict(optimizer_state_dict)
+    # if scheduler_state_dict is not None:
+    #     scheduler.load_state_dict(scheduler_state_dict)
 
     # recording loss curve
     train_loss_list = []
@@ -87,8 +87,9 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
     if visualize:
         plt.ion()  # Turn on interactive mode
         fig, axes = plt.subplots(1,3, figsize=(16, 4))
-
+    
     epoch_passed = int(np.floor(total_steps_start/float(len(train_loader))))
+    
     residual = total_steps_start - epoch_passed*len(train_loader)
     loss_overall = 0.0
     loss_overall_counter = 0
@@ -257,7 +258,7 @@ if __name__ == '__main__':
     session_name += datetime.now().strftime("%Y-%m-%d_%H_%M")
 
     # load dataset
-    train_dataset = OneStepDataset(data_path, "train", noise_std=params["noise"], random_rotation=True)
+    train_dataset = OneStepDataset(data_path, "train", noise_std=params["noise"], random_rotation=False)
     valid_dataset = OneStepDataset(data_path, "valid", noise_std=params["noise"])
     train_loader = pyg.loader.DataLoader(train_dataset, batch_size=params["batch_size"], shuffle=True, pin_memory=True, num_workers=1)
     valid_loader = pyg.loader.DataLoader(valid_dataset, batch_size=params["batch_size"], shuffle=True, pin_memory=True, num_workers=1)

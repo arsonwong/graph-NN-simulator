@@ -36,7 +36,7 @@ def rotate(tensor, rotation):
         tensor[...,1] = -tensor[..., 1]
     return tensor
     
-def preprocess(particle_type, position_seq, target_position, metadata, noise_std):
+def preprocess(particle_type, position_seq, target_position, metadata, noise_std, rotation=None):
     def generate_noise(position_seq, noise_std):
         """Generate noise for a trajectory"""
         velocity_seq = position_seq[:, 1:] - position_seq[:, :-1]
@@ -83,6 +83,13 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     distance_to_boundary = torch.cat((distance_to_lower_boundary, distance_to_upper_boundary), dim=-1)
     distance_to_boundary = torch.clip(distance_to_boundary / metadata["default_connectivity_radius"], -1.0, 1.0)
 
+    # manipulate the wall force (not much happens)
+    # distance_to_boundary = distance_to_boundary ** 10
+
+    distance_to_boundary = torch.abs(distance_to_boundary)
+    norm_distance_to_boundary, _ = torch.min(distance_to_boundary, dim=-1)
+    particles_close_to_wall = torch.where((particle_type != KINEMATIC_PARTICLE_ID) & (norm_distance_to_boundary < 1))[0]
+
     # edge-level features: displacement, distance
     dim = recent_position.size(-1)
     edge_displacement = (torch.gather(recent_position, dim=0, index=edge_index[0].unsqueeze(-1).expand(-1, dim)) -
@@ -90,12 +97,16 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     edge_displacement /= metadata["default_connectivity_radius"]
     edge_distance = torch.norm(edge_displacement, dim=-1, keepdim=True)
 
+    # manipulate the particle force
+    # edge_displacement /= 50
+    # edge_distance /= 50
+
     # ground truth for training
     if target_position is not None:
         last_velocity = velocity_seq[:, -1]
         next_velocity = target_position + position_noise[:, -1] - recent_position
         acceleration = next_velocity - last_velocity
-        acceleration = (acceleration - torch.tensor(metadata["acc_mean"])) / torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2 + noise_std ** 2)
+        acceleration /= torch.sqrt(torch.sum(torch.tensor(metadata["acc_std"]) ** 2) + noise_std ** 2)
     else:
         acceleration = None
 
@@ -106,7 +117,7 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
         edge_attr=torch.cat((edge_displacement, edge_distance), dim=-1),
         y=acceleration,
         pos=torch.cat((velocity_seq.reshape(velocity_seq.size(0), -1), distance_to_boundary), dim=-1),
-        aux = has_opp_neighbour
+        aux = {'has_opp_neighbour':has_opp_neighbour, 'particles_close_to_wall': particles_close_to_wall}
     )
 
     return graph
@@ -201,4 +212,7 @@ class LearnedSimulator(torch.nn.Module):
             node_feature, edge_feature = self.layers[i](node_feature, data.edge_index, edge_feature=edge_feature)
         # post-processing
         out = self.node_out(node_feature)
+
+        # manipulate the gravity
+        # out[:,1] += 0.16
         return out
