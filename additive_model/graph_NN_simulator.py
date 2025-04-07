@@ -304,7 +304,7 @@ class LearnedSimulator(torch.nn.Module):
         self.node_out1 = MLP(hidden_size//2, hidden_size//2, dim, 3, layernorm=False)
         self.edge_in2 = MLP(dim*(window_size+2), hidden_size//2, hidden_size//2, 3)
         self.node_out2 = MLP(hidden_size//2, hidden_size//2, dim, 3, layernorm=False)
-        self.wall_in = MLP(dim*window_size + 2 + dim, hidden_size, dim, 3)
+        self.wall_in = MLP(dim*window_size + 2 + dim, hidden_size//2, dim, 6, layernorm=False)
         self.n_mp_layers = n_mp_layers
         self.layers1 = torch.nn.ModuleList([InteractionNetwork(
             hidden_size//2, 3, antisymmetric=True
