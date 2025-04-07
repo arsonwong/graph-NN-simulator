@@ -298,6 +298,7 @@ class LearnedSimulator(torch.nn.Module):
         self.window_size = window_size
         self.dim = dim
         self.embed_type2 = torch.nn.Embedding(num_particle_types, particle_type_dim)
+        self.node_in1 = MLP(dim*(window_size), hidden_size//2, hidden_size//2, 3)
         self.node_in2 = MLP(particle_type_dim+dim, hidden_size//2, hidden_size//2, 3)
         self.node_in3 = MLP(dim*(window_size), hidden_size//2, hidden_size//2, 3)
         self.edge_in1 = MLP(dim*(window_size+2), hidden_size//2, hidden_size//2, 3)
@@ -307,7 +308,7 @@ class LearnedSimulator(torch.nn.Module):
         self.wall_in = MLP(dim*window_size + 2 + dim, hidden_size//2, dim, 6, layernorm=False)
         self.n_mp_layers = n_mp_layers
         self.layers1 = torch.nn.ModuleList([InteractionNetwork(
-            hidden_size//2, 3, antisymmetric=True
+            hidden_size//2, 3
         ) for _ in range(n_mp_layers)])
         self.layers2 = torch.nn.ModuleList([InteractionNetwork(
             hidden_size//2, 3
@@ -341,15 +342,22 @@ class LearnedSimulator(torch.nn.Module):
 
         # pre-processing
         # node feature: combine categorial feature data.x and contiguous feature data.pos.
-        node_feature1 = torch.zeros((data.x.shape[0], self.hidden_size//2), device=data.x.device) # no information inside, no damping
-        edge_feature1 = 0.5*(self.edge_in1(data.edge_attr)-self.edge_in1(-data.edge_attr)) # anti-symmetric
+        
+        node_feature1 = self.node_in1(data.pos)
+        blank_node_feature1 = torch.zeros((data.x.shape[0], self.window_size*self.dim), device=data.x.device)
+        blank_node_feature1 = self.node_in1(blank_node_feature1)
+        edge_feature1 = self.edge_in1(data.edge_attr)
         
         # stack of GNN layers
         for i in range(self.n_mp_layers):
             node_feature1, edge_feature1 = self.layers1[i](node_feature1, data.edge_index, edge_feature=edge_feature1)
+            blank_node_feature1, _ = self.layers1[i](blank_node_feature1, None, edge_feature=None, blank=True)
+
         # post-processing
         # acceleration due to neighbours
-        swarm_acceleration = 0.5*(self.node_out1(node_feature1)-self.node_out1(-node_feature1)) # anti-symmetric
+        swarm_acceleration = self.node_out1(node_feature1)
+        blank_ = self.node_out1(blank_node_feature1)
+        swarm_acceleration -= blank_
         out += swarm_acceleration
 
         #bias at obstacle particle - just try to stop the particle
@@ -457,4 +465,4 @@ class LearnedSimulator(torch.nn.Module):
             wall_out = self.wall_in(input)
             out[find_] += wall_out[:,0].unsqueeze(1) * unit_y + wall_out[:,1].unsqueeze(1) * -unit_x
 
-        return out
+        return out, swarm_acceleration

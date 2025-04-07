@@ -32,10 +32,10 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
     optimizer = torch.optim.Adam(simulator.parameters(), lr=params["lr"])
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.1 ** (1 / 5e6))
 
-    # if optimizer_state_dict is not None:
-    #     optimizer.load_state_dict(optimizer_state_dict)
-    # if scheduler_state_dict is not None:
-    #     scheduler.load_state_dict(scheduler_state_dict)
+    if optimizer_state_dict is not None:
+        optimizer.load_state_dict(optimizer_state_dict)
+    if scheduler_state_dict is not None:
+        scheduler.load_state_dict(scheduler_state_dict)
 
     # recording loss curve
     train_loss_list = []
@@ -110,7 +110,7 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
             optimizer.zero_grad()
             data = data.to(device)
             has_opp_neighbour = data.aux['has_opp_neighbour']
-            pred = simulator(data)
+            pred, swarm_accel = simulator(data)
             particle_type = data.x
             obstacle_particle_indices = torch.where(particle_type == KINEMATIC_PARTICLE_ID)[0]
             pred[obstacle_particle_indices,:] = data.y[obstacle_particle_indices,:]
@@ -131,6 +131,14 @@ def train(params, simulator, train_loader, valid_loader, metadata, valid_rollout
             pred[find_,:] *= 1.0+obstacle_bias
             data.y[find_,:] *= 1.0+obstacle_bias
             loss = loss_fn(pred, data.y)
+            if swarm_accel is not None:
+                recent_position = data.aux['recent_position']
+                center = torch.mean(recent_position,axis=0)
+                displacement = recent_position - center
+                angular_comp = pred[:,0]*displacement[:,1] - pred[:,1]*displacement[:,0]
+                mean_angular_comp = torch.mean(angular_comp,axis=0)
+                mean_accel = torch.mean(pred,axis=0)
+                loss += torch.sum(mean_angular_comp**2+mean_accel[0]**2+mean_accel[1]**2)*10
 
             loss.backward()
             optimizer.step()
