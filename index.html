@@ -1,10 +1,155 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>Hello from GitHub Pages</title>
+  <meta charset="UTF-8">
+  <title>GIF Viewer</title>
+  <style>
+    .header {
+      background-color: #1b1b1b;
+      color: white;
+      padding: 1em;
+      border-radius: 10px;
+      text-align: center;
+      margin-bottom: 2em;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    select {
+        font-size: 1.0em;
+        border-radius: 5px;
+    }
+
+    .description {
+        margin: 0 auto 2em auto;
+        padding: 1em;
+        background-color: #f8f9fa;
+        border-left: 5px solid #007bff;
+        border-radius: 5px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    }
+
+    .controls {
+      font-size: 1.5em;
+      text-align: center;
+      margin-bottom: 1em;
+    }
+
+    img {
+        display: block;
+        margin: 2em auto;
+        width: 80%;
+        max-width: 800px;
+        transform-origin: center;
+        overflow-y: auto;
+    }
+
+    .container {
+        display: flex;
+        flex-direction: column;
+        max-height: 100vh;
+        overflow-y: auto;
+    }
+
+    body { font-family: sans-serif; padding: 2em; }
+    select, button { margin-right: 1em; }
+    img { margin-top: 2em; max-width: 600px; display: block; }
+
+    #spinner {
+      display: none;
+      margin-top: 2em;
+      width: 40px;
+      height: 40px;
+      border: 5px solid #ccc;
+      border-top: 5px solid #007bff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    #error {
+      color: red;
+      margin-top: 1em;
+      display: none;
+    }
+  </style>
 </head>
 <body>
-  <h1>It works! 🎉</h1>
-  <p>This is my new GitHub Page.</p>
+
+  <div class="header">
+    <h1>🤖 Fun with Graph Neural Network Simulators</h1>
+  </div>
+
+  <!--
+  <div class="description">
+    <p>
+      Use the dropdown menus to explore different animation combinations. When you're ready, click "Show GIF" to preview your selection. Make sure the corresponding GIF file exists in your repository!
+    </p>
+  </div>
+-->
+  
+  <div class="controls">
+  <label for="a">Data set</label>
+  <select id="a" onchange="loadGIF()">
+    <option value="poster">poster</option>
+    <option value="trash">trash</option>
+    <option value="bullet">bullet</option>
+    <option value="fadeaway">fadeaway</option>
+    <option value="grate">grate</option>
+    <option value="valid">valid</option>
+  </select>
+
+  <label for="b">Conditioning</label>
+  <select id="b" onchange="loadGIF()">
+    <option value="normal">normal</option>
+    <option value="blob">blob</option>
+    <option value="fluid">fluid</option>
+    <option value="sandy">sandy</option>
+    <option value="zero gravity">zero gravity</option>
+  </select>
+
+  </div>
+
+  <div id="spinner"></div>
+  <p id="error">❌ GIF not found.</p>
+
+  <div class="container">
+  <img id="gifDisplay" src="" alt="GIF will appear here" style="display:none;" />
+  </div>
+
+  <script>
+    function loadGIF() {
+      const a = document.getElementById("a").value;
+      const b = document.getElementById("b").value;
+      const filename = `rollouts/WaterRamps/${a}_${b}.gif`; 
+
+      const img = document.getElementById("gifDisplay");
+      const spinner = document.getElementById("spinner");
+      const error = document.getElementById("error");
+
+      img.style.display = "none";
+      error.style.display = "none";
+      spinner.style.display = "block";
+
+      const tempImg = new Image();
+      tempImg.onload = () => {
+        img.src = filename;
+        img.style.display = "block";
+        spinner.style.display = "none";
+      };
+      tempImg.onerror = () => {
+        spinner.style.display = "none";
+        error.style.display = "block";
+      };
+      tempImg.src = filename;
+    }
+
+    // Load GIF on page load
+    window.onload = loadGIF;
+  </script>
+
 </body>
 </html>
