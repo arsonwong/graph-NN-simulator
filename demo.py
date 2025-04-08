@@ -62,7 +62,6 @@ def visualize_pair(particle_type, position_pred, position_gt, metadata, frames =
         plot_info = [
             visualize_prepare(axes, particle_type, position_pred, metadata),
         ]
-
     def update(step_i):
         outputs = []
         for _, position, points in plot_info:
@@ -74,39 +73,10 @@ def visualize_pair(particle_type, position_pred, position_gt, metadata, frames =
 
     return animation.FuncAnimation(fig, update, frames=np.arange(0, position_gt.size(1), 3), interval=0.1, blit=True)
 
-if __name__ == '__main__':
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    with open("config.yaml", "r") as f:
-        config = yaml.safe_load(f)
-
-    params = config["training"]
-    model_params = config["model"]
-    data_path = config['data']['data_path']
-    model_path = config['data']['model_path']
-    rollout_path = config['data']['rollout_path']
-
-    # build model
-    simulator = graph_model.LearnedSimulator(hidden_size=model_params["hidden_size"], 
-                                    n_mp_layers=model_params["n_mp_layers"], 
-                                    window_size=model_params["window_size"])
-    simulator = simulator.to(device)
-
-    checkpoint = torch.load(os.path.join(model_path, "2025-04-07_16_46_checkpoint_62000.pt"))
-    # checkpoint2 = torch.load(os.path.join(model_path, "2025-04-06_20_44_checkpoint_5000.pt"))
-    # print(checkpoint["model"].keys())
-    # for key in checkpoint["model"].keys():
-    #     if key.startswith("node_in1") or key.startswith("node_out1") or key.startswith("edge_in1") or key.startswith("layers1"):
-    #         checkpoint["model"][key] = checkpoint2["model"][key]
-    
-    simulator.load_state_dict(checkpoint["model"])
-    name = "poster"
-    rollout_dataset = RolloutDataset(data_path, name)
-    simulator.eval()
-
-    rollout_data = rollout_dataset[0]
-    rollout_start = 0
-    rollout_out = rollout(simulator, rollout_data, rollout_dataset.metadata, params["noise"], rollout_start=rollout_start, no_leak=True, rollout_length=100)
+def create_animation(data_path, rollout_data_name, rollout_path, example_index=0, rollout_start=0, rollout_length=500, modifiers=None, show=True, suffix=None):
+    rollout_dataset = RolloutDataset(data_path, rollout_data_name)
+    rollout_data = rollout_dataset[example_index]
+    rollout_out = rollout(simulator, rollout_data, rollout_dataset.metadata, params["noise"], rollout_start=rollout_start, no_leak=True, rollout_length=rollout_length, modifiers=modifiers)
     length_ = rollout_out.size(1)
     cropped_rollout_data_pos = rollout_data["position"][:,rollout_start:rollout_start+length_,:]
 
@@ -117,5 +87,53 @@ if __name__ == '__main__':
     rollout_out = torch.cat([first_frame, rollout_out], dim=1)
 
     anim = visualize_pair(rollout_data["particle_type"], rollout_out, cropped_rollout_data_pos, rollout_dataset.metadata, frames = 1)
+    name = rollout_data_name
+    if suffix is not None:
+        name += "_" + suffix
     anim.save(os.path.join(rollout_path, name+".gif"), writer=PillowWriter(fps=30))  # adjust fps as needed
-    plt.show()
+    if show:
+        plt.show()
+
+def compile_gifs():
+    names = ['fadeaway','poster','grate','bullet','trash','valid']
+    indices = [0,0,0,0,0,1]
+    viscosity_multiplier = [1, 1/1.4, 1,3,1]
+    integrity_multiplier = [1,1,0.5,1000,1]
+    gravity_multiplier = [1,1,1,1,0]
+    scenarios = ["normal","fluid","sandy","blob","zero gravity"]
+    for i, name in enumerate(names):
+        for j, scenario in enumerate(scenarios):
+            modifiers = {"viscosity_multiplier":viscosity_multiplier[j],
+                         "integrity_multiplier":integrity_multiplier[j],
+                         "gravity_multiplier":gravity_multiplier[j]}
+            create_animation(data_path, name, rollout_path, example_index=indices[i], modifiers=modifiers, show=False, suffix=scenario, rollout_length=500)
+
+if __name__ == '__main__':
+    name = "valid"
+    example_index=67
+
+    with open("config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+    load_model_path = config["data"]['load_model_path']
+    params = config["training"]
+    model_params = config["model"]
+    data_path = config['data']['data_path']
+    model_path = config['data']['model_path']
+    rollout_path = config['data']['rollout_path']
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    simulator = graph_model.LearnedSimulator(hidden_size=model_params["hidden_size"], 
+                                    n_mp_layers=model_params["n_mp_layers"], 
+                                    window_size=model_params["window_size"])
+    simulator = simulator.to(device)
+
+    checkpoint = torch.load(os.path.join(model_path, load_model_path))
+    simulator.eval()
+    simulator.load_state_dict(checkpoint["model"])
+    create_animation(data_path, name, rollout_path, example_index=example_index)
+    
+    
+    
+    
+
+    

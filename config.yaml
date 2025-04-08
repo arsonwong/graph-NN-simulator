@@ -1,19 +1,21 @@
 data:
   data_path : "datasets/WaterRamps"
   model_path : "models/WaterRamps"
+  rollout_path : "rollouts/WaterRamps"
+  load_model_path: "original_model_check_point.pt" #"additive_model_check_point.pt"
   training_stats_path : "training stats/WaterRamps"
 
 training:
   epoch: 5
-  batch_size: 4
-  lr: 1.0e-4
+  batch_size: 10
+  lr: 1.0e-3 #1.0e-4
   noise: 3.0e-4
-  save_interval: 5000
-  eval_interval: 5000
-  rollout_interval: 5000
+  save_interval: 2000
+  eval_interval: 2000
+  rollout_interval: 2000
   session_name: ""
   visualize: TRUE
-  load_model_path: "2025-04-04_22_09_checkpoint_140000.pt"
+  load_model_path: "2025-04-07_16_46_checkpoint_62000.pt"
   obstacle_bias: 4
   wall_bias: 4
 

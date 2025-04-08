@@ -83,8 +83,6 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
     distance_to_boundary = torch.cat((distance_to_lower_boundary, distance_to_upper_boundary), dim=-1)
     distance_to_boundary = torch.clip(distance_to_boundary / metadata["default_connectivity_radius"], -1.0, 1.0)
 
-    # manipulate the wall force (not much happens)
-    # distance_to_boundary = distance_to_boundary ** 10
 
     distance_to_boundary = torch.abs(distance_to_boundary)
     norm_distance_to_boundary, _ = torch.min(distance_to_boundary, dim=-1)
@@ -96,10 +94,6 @@ def preprocess(particle_type, position_seq, target_position, metadata, noise_std
                    torch.gather(recent_position, dim=0, index=edge_index[1].unsqueeze(-1).expand(-1, dim)))
     edge_displacement /= metadata["default_connectivity_radius"]
     edge_distance = torch.norm(edge_displacement, dim=-1, keepdim=True)
-
-    # manipulate the particle force
-    # edge_displacement /= 50
-    # edge_distance /= 50
 
     # ground truth for training
     if target_position is not None:
@@ -201,7 +195,7 @@ class LearnedSimulator(torch.nn.Module):
     def reset_parameters(self):
         torch.nn.init.xavier_uniform_(self.embed_type.weight)
 
-    def forward(self, data: pyg.data.Data) -> torch.Tensor:
+    def forward(self, data: pyg.data.Data, modifiers = None) -> torch.Tensor:
         # pre-processing
         # node feature: combine categorial feature data.x and contiguous feature data.pos.
         node_feature = torch.cat((self.embed_type(data.x), data.pos), dim=-1)
@@ -213,6 +207,4 @@ class LearnedSimulator(torch.nn.Module):
         # post-processing
         out = self.node_out(node_feature)
 
-        # manipulate the gravity
-        # out[:,1] += 0.16
         return out

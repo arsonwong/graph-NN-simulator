@@ -7,45 +7,10 @@ import os
 import json
 
 '''
-This code is a PyTorch implementation of a graph neural network (GNN) simulator for particle dynamics, specifically designed to simulate the motion of particles in a 2D space. 
-The GNN simulator is based on the Interaction Network architecture and is trained using a dataset of particle trajectories. 
-The code started off as basically a copy from a student capstone project 
-https://colab.research.google.com/drive/1hirUfPgLU35QCSQSZ7T2lZMyFMOaK_OF?usp=sharing#scrollTo=ZoB4_A6YJ7FP
-which is also described in this Medium article: Simulating Complex Physics with Graph Networks: step by step
-https://medium.com/stanford-cs224w/simulating-complex-physics-with-graph-networks-step-by-step-177354cb9b05
-'''
-
-'''
-2025-04-02 "physics" to help learn faster
-1. Acceleration due to boundary is the same for each of the 4 walls, just rotated
-So, we don't distinguish the 4 walls, just return the closest distance and direction to a wall (done)
-We let the model learn the rotational symmetry by randomly rotating the examples to make may duplicates (done)
-2. Expand edge feature to include relative velocities: this will help the model learn any damping (done)
-3. Not sure if this helps, but we can log direction and magnitudes, rather than displacement and magnitude
-Moreover for distances, use 1/(distance+tiny_bias) to make things more "impenetratable"
-There will be higher sense of urgency to move away from each other (done)
-'''
-
-'''
-2025-04-03 more physics
-acceleration due to neighbours + gravity + walls = 
-function (relative velocity, relative position, down direction, proximity to wall, wall direction, abs position [since walls don't move])
-
-change to
-
-acceleration due to neighbours = function (relative velocitIES, relative position)
-where (relative velocitIES, relative position) is passed to the edge
-and the node just embeds a blank thing at the start (no information inside)
-
-Also, separate force due to obstacles and force due to swarm neighbours
-
-acceleration due to gravity = constant * down direction
-
-acceleration due to walls = some perpend magnitude (proximity to wall, abs velocitIES in relation to wall direction) * wall direction
-+ some parallel magnitude (proximity to wall, abs velocitIES in relation to wall direction) * (parallel to wall direction)
-so that friction can be captured
-
-total acceleration = acceleration due to neighbours + acceleration due to gravity + acceleration due to walls'
+Additive model:
+total acceleration = acceleration due to gravity + swarm acceleration (similar neighbours) + obstacle acceleration (obstacle neighbours) + acceleration due to walls (boundaries)
+where preset handcrafted functions were written for gravity, obstacle acceleration and acceleration due to walls as starting points
+Each kind of acceleration (except gravity) takes as input the cumulative acceleration (force) of the particles so that it can react to it
 '''
 
 KINEMATIC_PARTICLE_ID = 3

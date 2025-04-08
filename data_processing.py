@@ -105,7 +105,7 @@ class RolloutDataset(pyg.data.Dataset):
         data = {"particle_type": particle_type, "position": position}
         return data
 
-def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=None, rotation=0, no_leak=False):
+def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=None, rotation=0, no_leak=False, modifiers=None):
     device = next(model.parameters()).device
     model.eval()
     window_size = model.window_size + 1
@@ -135,7 +135,7 @@ def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=No
         with torch.no_grad():
             graph = preprocess(particle_type, traj[:, -window_size:], None, metadata, 0.0)
             graph = graph.to(device)
-            acceleration = model(graph).cpu()
+            acceleration = model(graph, modifiers=modifiers).cpu()
             acceleration = acceleration * torch.sqrt(torch.sum(torch.tensor(metadata["acc_std"]) ** 2) + noise_std ** 2)
 
             recent_position = traj[:, -1]
