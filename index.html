@@ -2,8 +2,9 @@
 <html lang="en">
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">  
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <meta charset="UTF-8">
-  <title>GIF Viewer</title>
+  <title>Fun with GNN Simulator</title>
   <style>
     .header {
       background-color: #1b1b1b;
@@ -24,9 +25,7 @@
         margin: 0 auto 2em auto;
         padding: 1em;
         background-color: #f8f9fa;
-        border-left: 5px solid #007bff;
         border-radius: 5px;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
     }
 
     .controls {
@@ -101,14 +100,6 @@
     <h1>🤖 Fun with Graph Neural Network Simulators</h1>
   </div>
 
-  <!--
-  <div class="description">
-    <p>
-      Use the dropdown menus to explore different animation combinations. When you're ready, click "Show GIF" to preview your selection. Make sure the corresponding GIF file exists in your repository!
-    </p>
-  </div>
--->
-
   <div class="controls">
   <label for="a">Data set</label>
   <select id="a" onchange="loadGIF()">
@@ -136,6 +127,10 @@
 
   <div class="container">
   <img id="gifDisplay" src="" alt="GIF will appear here" style="display:none;" />
+  </div>
+
+  <div class="description" id="markdownContainer">
+    Loading description...
   </div>
 
   <script>
@@ -167,6 +162,18 @@
 
     // Load GIF on page load
     window.onload = loadGIF;
+  </script>
+
+  <script>
+    fetch('./README.md')
+      .then(response => response.text())
+      .then(text => {
+        document.getElementById('markdownContainer').innerHTML = marked.parse(text);
+      })
+      .catch(err => {
+        document.getElementById('markdownContainer').innerHTML = '⚠️ Failed to load description.';
+        console.error(err);
+      });
   </script>
 
 </body>
