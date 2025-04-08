@@ -301,7 +301,15 @@ class LearnedSimulator(torch.nn.Module):
     def reset_parameters(self):
         torch.nn.init.xavier_uniform_(self.embed_type2.weight)
 
-    def forward(self, data: pyg.data.Data) -> torch.Tensor:
+    def forward(self, data: pyg.data.Data, modifiers=None) -> torch.Tensor:
+        # torch.cat((edge_displacement1, inv_edge_displacement1, normal_relative_velocities1.flatten(start_dim=1)), dim=-1),
+        if modifiers is not None and "viscosity_multiplier" in modifiers: # recommended to stay within 1.5 and 1/1.5
+            data.edge_attr[:,[0,1]] /= modifiers["viscosity_multiplier"] 
+            data.edge_attr[:,[2,3]] *= modifiers["viscosity_multiplier"]
+
+        if modifiers is not None and "integrity_multiplier" in modifiers: # recommended to stay within 0.5 and infinity
+            data.edge_attr[:,[4,5]] /= modifiers["integrity_multiplier"] 
+
         acceleration_scale = data.aux['acceleration_scale']
         velocity_scale = data.aux['velocity_scale']
         recent_velocity = data.aux['recent_velocity']
@@ -313,9 +321,11 @@ class LearnedSimulator(torch.nn.Module):
             unit_x = unit_x[0]
             unit_y = unit_y[0]
 
-        #acceleration due to gravity = constant * down direction, with bias term that's the true value
+        #acceleration due to gravity = constant * down direction
         down_direction = data.aux['down_direction']
         g = 5.5339e-05/acceleration_scale*60/94
+        if modifiers is not None and "gravity_multiplier" in modifiers:
+            g *= modifiers["gravity_multiplier"]
         out = g*down_direction
 
         # no drag force
