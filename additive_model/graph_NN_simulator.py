@@ -241,41 +241,21 @@ class MLP(torch.nn.Module):
 class InteractionNetwork(pyg.nn.MessagePassing):
     """Interaction Network as proposed in this paper: 
     https://proceedings.neurips.cc/paper/2016/hash/3147da8ab4a0437c15ef51a5cc7f2dc4-Abstract.html"""
-    def __init__(self, hidden_size, layers, antisymmetric=False):
+    def __init__(self, hidden_size, layers):
         super().__init__()
         self.lin_edge = MLP(hidden_size * 3, hidden_size, hidden_size, layers)
         self.lin_node = MLP(hidden_size * 2, hidden_size, hidden_size, layers)
-        self.hidden_size = hidden_size
-        self.anti_symmetric = antisymmetric
 
-    def forward(self, x, edge_index, edge_feature, blank=False):
-        if blank:
-            aggr_blank = torch.zeros((x.shape[0], self.hidden_size), device=x.device)
-            input = torch.cat((x, aggr_blank), dim=-1)
-            if self.anti_symmetric:
-                node_out_blank = 0.5*(self.lin_node(input)-self.lin_node(-input))
-            else:
-                node_out_blank = self.lin_node(input)
-            node_out_blank = x + node_out_blank
-            return node_out_blank, None
-        
+    def forward(self, x, edge_index, edge_feature):
         edge_out, aggr = self.propagate(edge_index, x=(x, x), edge_feature=edge_feature)
-        input = torch.cat((x, aggr), dim=-1)
-        if self.anti_symmetric:
-            node_out = 0.5*(self.lin_node(input)-self.lin_node(-input))
-        else:
-            node_out = self.lin_node(input)
+        node_out = self.lin_node(torch.cat((x, aggr), dim=-1))
         edge_out = edge_feature + edge_out
         node_out = x + node_out
         return node_out, edge_out
 
     def message(self, x_i, x_j, edge_feature):
-        if self.anti_symmetric:
-            x = torch.cat((x_i-x_j, x_j-x_i, edge_feature), dim=-1)
-            x = 0.5*(self.lin_edge(x)-self.lin_edge(-x))
-        else:
-            x = torch.cat((x_i, x_j, edge_feature), dim=-1)
-            x = self.lin_edge(x)
+        x = torch.cat((x_i, x_j, edge_feature), dim=-1)
+        x = self.lin_edge(x)
         return x
 
     def aggregate(self, inputs, index, dim_size=None):
@@ -298,7 +278,7 @@ class LearnedSimulator(torch.nn.Module):
         self.window_size = window_size
         self.dim = dim
         self.embed_type2 = torch.nn.Embedding(num_particle_types, particle_type_dim)
-        self.node_in1 = MLP(dim*(window_size), hidden_size//2, hidden_size//2, 3)
+        self.node_in1 = MLP(dim+1, hidden_size//2, hidden_size//2, 3)
         self.node_in2 = MLP(particle_type_dim+dim, hidden_size//2, hidden_size//2, 3)
         self.node_in3 = MLP(dim*(window_size), hidden_size//2, hidden_size//2, 3)
         self.edge_in1 = MLP(dim*(window_size+2), hidden_size//2, hidden_size//2, 3)
@@ -306,7 +286,7 @@ class LearnedSimulator(torch.nn.Module):
         self.edge_in2 = MLP(dim*(window_size+2), hidden_size//2, hidden_size//2, 3)
         self.node_out2 = MLP(hidden_size//2, hidden_size//2, dim, 3, layernorm=False)
         self.wall_in = MLP(dim*window_size + 2 + dim, hidden_size//2, dim, 6, layernorm=False)
-        self.n_mp_layers = n_mp_layers
+        self.n_mp_layers = n_mp_layers // 2
         self.layers1 = torch.nn.ModuleList([InteractionNetwork(
             hidden_size//2, 3
         ) for _ in range(n_mp_layers)])
@@ -335,29 +315,38 @@ class LearnedSimulator(torch.nn.Module):
 
         #acceleration due to gravity = constant * down direction, with bias term that's the true value
         down_direction = data.aux['down_direction']
-        g = 5.5339e-05/acceleration_scale
-        # manipulate gravity
-        # g *= -1
+        g = 5.5339e-05/acceleration_scale*60/94
         out = g*down_direction
 
-        # pre-processing
-        # node feature: combine categorial feature data.x and contiguous feature data.pos.
-        
-        node_feature1 = self.node_in1(data.pos)
-        blank_node_feature1 = torch.zeros((data.x.shape[0], self.window_size*self.dim), device=data.x.device)
-        blank_node_feature1 = self.node_in1(blank_node_feature1)
+        # no drag force
+        # last particle is a reference for blank
+        node_feature1 = torch.zeros((data.x.shape[0]+1, self.dim+1), device=data.x.device)
+        node_feature1 = self.node_in1(node_feature1)
         edge_feature1 = self.edge_in1(data.edge_attr)
         
         # stack of GNN layers
         for i in range(self.n_mp_layers):
             node_feature1, edge_feature1 = self.layers1[i](node_feature1, data.edge_index, edge_feature=edge_feature1)
-            blank_node_feature1, _ = self.layers1[i](blank_node_feature1, None, edge_feature=None, blank=True)
 
         # post-processing
         # acceleration due to neighbours
         swarm_acceleration = self.node_out1(node_feature1)
-        blank_ = self.node_out1(blank_node_feature1)
+        blank_ = swarm_acceleration[-1,:]
+        swarm_acceleration = swarm_acceleration[0:-1,:]
         swarm_acceleration -= blank_
+        mean_swarm_acceleration = torch.mean(swarm_acceleration,axis=0)
+        swarm_acceleration -= mean_swarm_acceleration
+        recent_position = data.aux['recent_position']
+        center = torch.mean(recent_position,axis=0)
+        displacement = recent_position-center
+        distance = displacement.norm(dim=1, keepdim=True)
+        total_distance = torch.sum(distance)
+        moment = swarm_acceleration[:,1]*displacement[:,0]-swarm_acceleration[:,0]*displacement[:,1]
+        total_angular_momentum = torch.sum(moment)
+        counter_moment = torch.zeros_like(swarm_acceleration)
+        counter_moment[:,0] = displacement[:,1]*total_angular_momentum/total_distance
+        counter_moment[:,1] = -displacement[:,0]*total_angular_momentum/total_distance
+        swarm_acceleration += counter_moment
         out += swarm_acceleration
 
         #bias at obstacle particle - just try to stop the particle
@@ -418,51 +407,80 @@ class LearnedSimulator(torch.nn.Module):
 
         # next force gets a chance to experience the current force, so that it may try to counteract it
         node_feature2 = torch.cat((self.embed_type2(data.x), out), dim=-1)
-        node_feature2 = self.node_in2(node_feature2)
-        edge_feature2 = self.edge_in2(data.edge_attr2)
         find_ = torch.where(data.x != KINEMATIC_PARTICLE_ID)[0]
         blank_x = (torch.ones((1), device=data.x.device) * data.x[find_[0]]).to(torch.int64)
         blank_node_feature2 = torch.cat((self.embed_type2(blank_x), torch.zeros((1, 2), device=data.x.device)),dim=-1)
-        blank_node_feature2 = self.node_in2(blank_node_feature2)
+        node_feature2 = torch.cat((node_feature2, blank_node_feature2),dim=0)
+        node_feature2 = self.node_in2(node_feature2)
+        edge_feature2 = self.edge_in2(data.edge_attr2)
 
         # stack of GNN layers
         for i in range(self.n_mp_layers):
             node_feature2, edge_feature2 = self.layers2[i](node_feature2, data.edge_index2, edge_feature=edge_feature2)
-            blank_node_feature2, _ = self.layers2[i](blank_node_feature2, None, edge_feature=None, blank=True)
 
         obstacle_acceleration = self.node_out2(node_feature2)
-        blank_ = self.node_out2(blank_node_feature2)
+        blank_ = obstacle_acceleration[-1,:] # subtract the blank
+        obstacle_acceleration = obstacle_acceleration[0:-1,:]
         obstacle_acceleration -= blank_
+        find_ = torch.where(data.aux['has_opp_neighbour']==False)[0]
+        obstacle_acceleration[find_,:] = 0.0
 
         out += obstacle_acceleration
 
+        wall_accel = torch.zeros((data.x.shape[0],2), device=data.x.device)
         # wall force
         find_ = torch.where(norm_inv_distance_to_boundary[:,0].unsqueeze(1) > 1e-7)[0]
         if len(find_) > 0:
             # wall gets to feel the other forces so that it gets a chance to repel them
             input = torch.cat((-out[find_,0].unsqueeze(1), -out[find_,1].unsqueeze(1), -normal_velocity_seq[find_,:,0],-normal_velocity_seq[find_,:,1],norm_inv_distance_to_boundary[find_,0].unsqueeze(1),norm_distance_to_boundary[find_,0].unsqueeze(1)), dim=-1)
             wall_out = self.wall_in(input)
-            out[find_] += wall_out[:,0].unsqueeze(1) * -unit_x + wall_out[:,1].unsqueeze(1) * -unit_y
+            wall_accel[find_] += wall_out[:,0].unsqueeze(1) * -unit_x + wall_out[:,1].unsqueeze(1) * -unit_y
 
         find_ = torch.where(norm_inv_distance_to_boundary[:,1].unsqueeze(1) > 1e-7)[0]
         if len(find_) > 0:
             # wall gets to feel the other forces so that it gets a chance to repel them
             input = torch.cat((-out[find_,1].unsqueeze(1), out[find_,0].unsqueeze(1),-normal_velocity_seq[find_,:,1],normal_velocity_seq[find_,:,0],norm_inv_distance_to_boundary[find_,1].unsqueeze(1),norm_distance_to_boundary[find_,1].unsqueeze(1)), dim=-1)
             wall_out = self.wall_in(input)
-            out[find_] += wall_out[:,0].unsqueeze(1) * -unit_y + wall_out[:,1].unsqueeze(1) * unit_x
+            wall_accel[find_] += wall_out[:,0].unsqueeze(1) * -unit_y + wall_out[:,1].unsqueeze(1) * unit_x
 
         find_ = torch.where(norm_inv_distance_to_boundary[:,2].unsqueeze(1) > 1e-7)[0]
         if len(find_) > 0:
             # wall gets to feel the other forces so that it gets a chance to repel them
             input = torch.cat((out[find_,0].unsqueeze(1), out[find_,1].unsqueeze(1),normal_velocity_seq[find_,:,0],normal_velocity_seq[find_,:,1],norm_inv_distance_to_boundary[find_,2].unsqueeze(1),norm_distance_to_boundary[find_,2].unsqueeze(1)), dim=-1)
             wall_out = self.wall_in(input)
-            out[find_] += wall_out[:,0].unsqueeze(1) * unit_x + wall_out[:,1].unsqueeze(1) * unit_y
+            wall_accel[find_] += wall_out[:,0].unsqueeze(1) * unit_x + wall_out[:,1].unsqueeze(1) * unit_y
 
         find_ = torch.where(norm_inv_distance_to_boundary[:,3].unsqueeze(1) > 1e-7)[0]
         if len(find_) > 0:
              # wall gets to feel the other forces so that it gets a chance to repel them
             input = torch.cat((out[find_,1].unsqueeze(1), -out[find_,0].unsqueeze(1),normal_velocity_seq[find_,:,1],-normal_velocity_seq[find_,:,0],norm_inv_distance_to_boundary[find_,3].unsqueeze(1),norm_distance_to_boundary[find_,3].unsqueeze(1)), dim=-1)
             wall_out = self.wall_in(input)
-            out[find_] += wall_out[:,0].unsqueeze(1) * unit_y + wall_out[:,1].unsqueeze(1) * -unit_x
+            wall_accel[find_] += wall_out[:,0].unsqueeze(1) * unit_y + wall_out[:,1].unsqueeze(1) * -unit_x
 
-        return out, swarm_acceleration
+        out += wall_accel
+
+        is_at_wall_or_obstacle = torch.zeros((data.x.shape[0]), device=data.x.device)
+        find_ = data.aux['has_opp_neighbour']
+        particles_close_to_wall = data.aux['particles_close_to_wall']
+        is_at_wall_or_obstacle[find_] = 1
+        is_at_wall_or_obstacle[particles_close_to_wall] = 1
+        node_feature1 = torch.zeros((data.x.shape[0], self.dim+1), device=data.x.device)
+        node_feature1[:,0:2] = -obstacle_bias-wall_bias+obstacle_acceleration+wall_accel
+        node_feature1[:,2] = is_at_wall_or_obstacle
+        blank_node_feature1 = torch.zeros((1, self.dim+1), device=data.x.device)
+        node_feature1 = torch.cat((node_feature1,blank_node_feature1),dim=0)
+        node_feature1 = self.node_in1(node_feature1)
+        edge_feature1 = self.edge_in1(data.edge_attr)
+        
+        # stack of GNN layers
+        for i in range(self.n_mp_layers):
+            node_feature1, edge_feature1 = self.layers1[i](node_feature1, data.edge_index, edge_feature=edge_feature1)
+        swarm_acceleration_mod = self.node_out1(node_feature1)
+        blank_ = swarm_acceleration_mod[-1,:] # subtract the blank
+        swarm_acceleration_mod = swarm_acceleration_mod[0:-1,:]
+        swarm_acceleration_mod -= blank_
+        swarm_acceleration_mod -= mean_swarm_acceleration
+        swarm_acceleration_mod += counter_moment
+        out += swarm_acceleration_mod - swarm_acceleration
+
+        return out

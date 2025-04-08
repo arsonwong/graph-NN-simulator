@@ -105,7 +105,7 @@ class RolloutDataset(pyg.data.Dataset):
         data = {"particle_type": particle_type, "position": position}
         return data
 
-def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=None, rotation=0):
+def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=None, rotation=0, no_leak=False):
     device = next(model.parameters()).device
     model.eval()
     window_size = model.window_size + 1
@@ -147,16 +147,17 @@ def rollout(model, data, metadata, noise_std, rollout_start=0, rollout_length=No
             if len(obstacle_particle_indices) > 0:
                 new_position[obstacle_particle_indices,:] = real_pos[obstacle_particle_indices, time+window_size+rollout_start,:]
 
-            # new_position[:,0] = torch.maximum(new_position[:,0], boundary[0,0])
-            # new_position[:,1] = torch.maximum(new_position[:,1], boundary[1,0])
-            # new_position[:,0] = torch.minimum(new_position[:,0], boundary[0,1])
-            # new_position[:,1] = torch.minimum(new_position[:,1], boundary[1,1])
+            if no_leak:
+                new_position[:,0] = torch.maximum(new_position[:,0], boundary[0,0])
+                new_position[:,1] = torch.maximum(new_position[:,1], boundary[1,0])
+                new_position[:,0] = torch.minimum(new_position[:,0], boundary[0,1])
+                new_position[:,1] = torch.minimum(new_position[:,1], boundary[1,1])
             traj = torch.cat((traj, new_position.unsqueeze(1)), dim=1)
 
     return traj
 
 
-def oneStepMSE(simulator, dataloader, metadata, noise, sets_to_test=500):
+def oneStepMSE(simulator, dataloader, metadata, noise, sets_to_test=50):
     """Returns two values, loss and MSE"""
     total_loss = 0.0
     total_mse = 0.0
